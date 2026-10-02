@@ -1,6 +1,8 @@
 # Shard-to-GPU index build scheduler
 
-A coordinator that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has finished its build and its OLTP job. One slow shard holds up the whole round.
+A coordinator that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has finished its build and all of its follow-up jobs. One slow shard holds up the whole round.
+
+Start small: the default configuration is **6 shards and 2 GPU workers**. Scaling to 50 shards is a config change, done once the small setup runs end to end.
 
 Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. Read the section for the current phase before starting work.
 
@@ -14,7 +16,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 | Component | Role | Language |
 | --- | --- | --- |
 | `coordinator/` | Decides local vs GPU per build, owns the queue, reaps expired leases, tracks rounds | Go |
-| `shard/` | Simulates N shards (goroutines), each with a sequential CPU queue for local builds and OLTP jobs | Go |
+| `shard/` | Simulates N shards (goroutines), each with a sequential CPU queue for local builds and follow-up jobs | Go |
 | `worker/` | Pulls GPU jobs, renews its lease, runs the build, publishes the result | Python |
 | `db/migrations/` | Postgres schema; Postgres is the only source of truth | SQL |
 | `experiments/` | Seeded workloads, discrete-event simulator, runner, results | Go / Python |
@@ -35,11 +37,13 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 
 ## Modeling assumptions (all config flags)
 
-- A round gives every shard one build and one OLTP job; it ends when every shard has finished both.
-- A local build occupies the shard's CPU; OLTP can't start until it finishes.
-- An offloaded build frees the CPU, so OLTP runs in parallel. A per-job flag can instead make OLTP wait for the new index.
-- A GPU worker runs one build at a time.
-- Index sizes are Zipf-distributed across shards.
+- A **round** gives every shard one index build and a list of **follow-up jobs**. It ends when every shard has finished its build and all of its follow-up jobs.
+- A **follow-up job** is any CPU work the shard does after submitting its build: an OLTP batch, a query workload, anything. Each has a CPU duration and a flag `needs_index`. The old "one OLTP job" model is the special case of a one-job list.
+- A **local build** occupies the shard's CPU; no follow-up job runs until it finishes.
+- An **offloaded build** frees the CPU. Follow-up jobs with `needs_index = false` run immediately; those with `needs_index = true` wait for the build to complete wherever it ran.
+- Follow-up jobs on a shard run sequentially, in order. They are CPU-only and never go to the GPU pool.
+- A **GPU worker** runs one build at a time and has a modeled memory capacity. A build whose modeled memory need exceeds every worker's capacity must build locally.
+- **Workloads are scenarios**: a seeded combination of a size distribution (uniform, Zipf, bimodal), a follow-up profile, an arrival pattern (all at once or staggered), and a pool configuration. Zipf with all-at-once arrival is the default. The scenario table is in `docs/roadmap.md` (Phase 3).
 
 ## Conventions
 
@@ -54,6 +58,8 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 - Ask before adding a dependency or changing the schema.
 - When a design question isn't answered here or in the roadmap, ask instead of picking silently.
 - Keep a **Commands** section below up to date as build, test and run commands are added.
+- **Explain Docker, Kubernetes and Go concepts as you go.** The owner has school-level knowledge of these and deep database knowledge. When you introduce a concept from any of the three (an image vs a container, a Compose service, a goroutine, a Go module, a Deployment, a probe, a taint) explain it in a sentence or two in your reply the first time it comes up. This applies to every agent and subagent working in this repo.
+- **Keep `docs/study-notes.md` up to date.** It is gitignored. Add a short entry for each concept you explained, grouped by topic, so the owner has one place to review. Don't repeat Postgres concepts; those are known.
 
 ## Commands
 

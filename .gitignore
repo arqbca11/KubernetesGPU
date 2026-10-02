@@ -18,3 +18,5 @@ experiments/results/*.png
 *.local
 .DS_Store
 docs/motivation.md
+docs/study-notes.md
+.obsidian/

@@ -6,7 +6,7 @@ The project answers one question: when up to 50 shards compete for a few GPU wor
 
 Two pressures pull against each other:
 
-- **Building locally blocks the shard.** DML is blocked while the CPU builds the HNSW graph, so the shard's next OLTP job waits. Because results are gathered from all shards, one slow shard holds up the whole cluster.
+- **Building locally blocks the shard.** DML is blocked while the CPU builds the HNSW graph, so the shard's follow-up work (an OLTP batch, a query workload, anything on its CPU) waits. Because results are gathered from all shards, one slow shard holds up the whole cluster.
 - **Offloading to a saturated pool doesn't help.** If every GPU is busy, a new job just waits in a queue, and a local CPU build might have finished sooner.
 
 **Primary metric:** round completion time, from the start of a round until the coordinator has all shard results. Report p50 and p99 over many rounds.
@@ -17,11 +17,13 @@ Two pressures pull against each other:
 
 Each of these is a config flag, so results can show which ones they depend on.
 
-1. A **round** gives every shard one index build and one OLTP job. The round ends when every shard has finished both.
-2. A **local build** occupies the shard's CPU, and its OLTP job can't start until the build finishes.
-3. An **offloaded build** frees the shard's CPU, so its OLTP job runs while the GPU builds. The shard is done when both finish. A per-job flag can instead make the OLTP job wait for the new index; the default workload mixes both kinds.
-4. A **GPU worker** runs one build at a time to start with. Batching several small builds onto one worker comes later.
-5. **Skew:** index sizes follow a Zipf-like distribution, so a few shards are heavy and most are light.
+1. A **round** gives every shard one index build and a list of **follow-up jobs**. The round ends when every shard has finished its build and all of its follow-up jobs.
+2. A **follow-up job** is any CPU work the shard does after submitting its build. Each has a CPU duration and a flag `needs_index`. Follow-up jobs on a shard run sequentially, in order, and never go to the GPU pool. "One OLTP job per shard" is the special case of a one-job list, and the default profile mixes jobs that need the index with jobs that don't.
+3. A **local build** occupies the shard's CPU, and no follow-up job can start until the build finishes.
+4. An **offloaded build** frees the shard's CPU. Follow-up jobs with `needs_index = false` run while the GPU builds; those with `needs_index = true` wait for the build to complete wherever it ran. The shard is done when the build and every follow-up job have finished.
+5. A **GPU worker** runs one build at a time to start with, and has a modeled memory capacity. A build whose modeled memory need exceeds every worker's capacity must build locally. Batching several small builds onto one worker comes later.
+6. **Distribution:** index sizes across shards follow a configurable distribution. Zipf (a few heavy shards, most light) is the default; uniform and bimodal are the other scenarios (see Phase 3, Scenarios).
+7. **Scale:** the default configuration is 6 shards and 2 GPU workers. 50 shards and 3 workers is the target, reached by changing config once the small setup runs.
 
 ## Why this is a runtime coordination problem
 
@@ -48,7 +50,7 @@ Shards ask the coordinator where each build should run. The coordinator either t
 
 | Component | What it does | Language | First appears |
 | --- | --- | --- | --- |
-| Shard simulator (×50) | Creates one build and one OLTP job per round, runs local builds when told to, reports completion | Go | Phase 1 |
+| Shard simulator (×6, then ×50) | Creates one build and a list of follow-up jobs per round, runs local builds when told to, reports completion of each | Go | Phase 1 |
 | Coordinator | Decides CPU or GPU per build, owns the queue, grants and reaps leases, tracks rounds | Go | Phase 1 |
 | Job store | Postgres tables for jobs, leases and rounds; the single source of truth | SQL | Phase 1 |
 | GPU worker (×2–4) | Pulls jobs, renews its lease, runs the build, publishes the result | Python | Phase 1 (fake), 4 (hnswlib), 5 (cuVS) |
@@ -72,7 +74,7 @@ Keep the worker's build step behind one interface (`build(job) -> artifact`) fro
 
 ## Phase 1: Coordinator with fake jobs
 
-Build a coordinator that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. **Done when** a worker killed mid-job still results in that job finishing exactly once.
+Build a coordinator that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. Start at 6 shards and 2 workers. **Done when** a worker killed mid-job still results in that job finishing exactly once, at both 6 and 50 shards.
 
 ### Fake jobs and cost model v0
 
@@ -81,16 +83,28 @@ A job carries `n_vectors` and `dim`. The worker sleeps for the modeled GPU time 
 - CPU build time = a × n × log n × dim
 - GPU build time = CPU build time ÷ speedup + fixed overhead
 - Transfer time = (vector bytes out + index bytes back) ÷ bandwidth
+- GPU memory need = b × n × dim (vectors plus graph), compared against each worker's configured capacity
 
 ### Schema
 
+Four tables. `builds` is the queue and the lease; `shard_jobs` records follow-up jobs so round completion and the timeline come from Postgres alone; `workers` is membership and health; `rounds` is bookkeeping.
+
 ```sql
+CREATE TABLE rounds (
+  round_id     bigint PRIMARY KEY,
+  scenario     text NOT NULL,
+  seed         bigint NOT NULL,
+  started_at   timestamptz NOT NULL DEFAULT now(),
+  finished_at  timestamptz
+);
+
 CREATE TABLE builds (
   build_id     text PRIMARY KEY,        -- shard_id:round_id, the idempotency key
-  round_id     bigint NOT NULL,
+  round_id     bigint NOT NULL REFERENCES rounds,
   shard_id     int NOT NULL,
   n_vectors    bigint NOT NULL,
   dim          int NOT NULL,
+  mem_bytes    bigint NOT NULL,         -- modeled GPU memory need
   placement    text NOT NULL,           -- 'local' or 'gpu'
   state        text NOT NULL,           -- queued, leased, done, failed
   priority     double precision NOT NULL DEFAULT 0,
@@ -103,7 +117,27 @@ CREATE TABLE builds (
 );
 CREATE INDEX builds_queue ON builds (priority DESC, enqueued_at)
   WHERE state = 'queued' AND placement = 'gpu';
+
+CREATE TABLE shard_jobs (
+  round_id     bigint NOT NULL REFERENCES rounds,
+  shard_id     int NOT NULL,
+  seq          int NOT NULL,            -- order within the shard's queue
+  duration_ms  bigint NOT NULL,         -- modeled CPU time
+  needs_index  boolean NOT NULL,
+  started_at   timestamptz,
+  finished_at  timestamptz,
+  PRIMARY KEY (round_id, shard_id, seq)
+);
+
+CREATE TABLE workers (
+  worker_id    text PRIMARY KEY,
+  mem_bytes    bigint NOT NULL,         -- modeled GPU memory capacity
+  last_seen    timestamptz NOT NULL,    -- heartbeat; stale rows are not counted in pool state
+  registered_at timestamptz NOT NULL DEFAULT now()
+);
 ```
+
+Local builds also get a `builds` row (`placement = 'local'`), written by the shard, so every build in a round is visible in one place.
 
 ### The four operations
 
@@ -130,14 +164,15 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 ### Steps
 
-- [ ] Postgres schema and migrations
-- [ ] Coordinator API: start a round, submit a build (v0 policy: always GPU), read round status
-- [ ] Worker loop: claim, renew on a background thread, sleep, complete
+- [ ] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
+- [ ] Coordinator API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
+- [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
 - [ ] Reaper in the coordinator
 - [ ] Shard simulator: one binary running N shards as goroutines, each with a sequential CPU queue that applies the blocking rules from the assumptions above
-- [ ] Seeded workload generator: 50 shards, Zipf-distributed index sizes, OLTP durations
-- [ ] Docker Compose: Postgres, coordinator, shard simulator, 3 workers
-- [ ] Per-round timeline output: for each shard, when its build and its OLTP job started and ended
+- [ ] Seeded workload generator with the scenario knobs: size distribution, follow-up profile, arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
+- [ ] Docker Compose: Postgres, coordinator, shard simulator, 2 workers. 6 shards by default.
+- [ ] Per-round timeline output: for each shard, when its build and each follow-up job started and ended
+- [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
 
 ### Failure tests
 
@@ -201,8 +236,8 @@ A policy is a pure function of the state it's given, which lets the same code ru
 
 What the coordinator needs to know:
 
-- **From the shard:** `n_vectors`, `dim`, remaining OLTP work in seconds, and its local build estimate
-- **From the pool:** worker count, the remaining time of each in-flight job, and the estimated GPU time of each queued job
+- **From the shard:** `n_vectors`, `dim`, `mem_bytes`, its follow-up job list (durations and `needs_index` flags), and its local build estimate
+- **From the pool:** live workers and their memory capacity (from the `workers` table), the remaining time of each in-flight job, and the estimated GPU time of each queued job
 
 **GPU finish estimate:** replay the queue. Given each worker's remaining time and the jobs ahead in priority order, assign each job to the earliest-free worker, then add this job's GPU and transfer time. This is list scheduling, and it only works because the coordinator can see the whole queue.
 
@@ -211,8 +246,8 @@ What the coordinator needs to know:
 1. **Always GPU.** Every build goes to the queue, first come first served. This is the baseline.
 2. **Static threshold.** Builds with `n_vectors` ≥ T go to the GPU queue, the rest build locally. Sweep T. This is the OpenSearch-style approach.
 3. **Cost-based with critical-path priority.**
-    - Local finish = CPU build + OLTP, run one after the other.
-    - GPU finish = the later of the GPU finish estimate and the OLTP job when the two are independent, or the GPU finish estimate plus the OLTP job when the OLTP job needs the index.
+    - Local finish = CPU build, then every follow-up job in order.
+    - GPU finish = simulate the shard's follow-up queue: jobs with `needs_index = false` run from now; the first job with `needs_index = true` waits for the GPU finish estimate; everything after it runs in order.
     - Choose whichever finishes sooner.
     - Queue priority = the shard's finish time if it built locally, largest first, so the shards that would be the worst stragglers get GPUs first. This is the longest-processing-time-first rule for minimizing makespan.
     - On each `reconsider`, move any queued job whose GPU estimate now exceeds its local finish back to local.
@@ -222,6 +257,19 @@ What the coordinator needs to know:
 
 Fake jobs sleep in real time, so a 200-round sweep on the live system would take days. A small discrete-event simulator calls the same policy code with modeled time. Use it for the sweeps, and run a few configurations on the live cluster to check that the two agree. Where they disagree is a finding worth writing up.
 
+### Scenarios
+
+A workload is a seeded combination of four knobs: size distribution, follow-up profile, arrival pattern, and pool configuration. Each named scenario is chosen to stress one GPU resource management case. Every policy runs on every scenario.
+
+| Scenario | Shape | GPU management case it exercises |
+| --- | --- | --- |
+| Uniform | Equal sizes, light follow-ups, all at once | Pure queueing. Does CPU fallback relieve an undersized pool? |
+| Skewed (default) | Zipf sizes, mixed follow-ups, all at once | Critical-path priority. Longest-build-first should beat FCFS. |
+| Bimodal | A few huge builds, many tiny; some huge builds exceed one worker's memory | Memory bin-packing, and stragglers set by the huge builds. |
+| Downstream-heavy | Medium builds; one shard has heavy follow-up work that needs the index | The critical path is set by work after the build, not by build size. |
+| Staggered | Shards submit at different times within the round | Speculation and reneging. GPUs sit idle while CPU builds are mid-flight. |
+| Shrinking pool | A worker dies or is drained mid-round | Reneging queued jobs back to local. |
+
 ### Sweeps
 
 | Variable | Values | What it shows |
@@ -229,7 +277,8 @@ Fake jobs sleep in real time, so a 200-round sweep on the live system would take
 | GPU workers | 1, 2, 4 | Where GPUs stop being the bottleneck |
 | Size skew (Zipf exponent) | 0.5, 1.0, 1.5 | How much critical-path priority matters |
 | Estimate error (log-normal σ on every estimate) | 0, 0.3, 0.6 | How fragile the cost model is, and whether speculation covers for it |
-| OLTP work relative to build work | 0.5×, 1×, 2× | When blocking the shard costs the most |
+| Follow-up work relative to build work | 0.5×, 1×, 2× | When blocking the shard costs the most |
+| Shard count | 6, 50 | Whether conclusions from the small setup hold at scale |
 
 ### Steps
 
@@ -263,7 +312,7 @@ Workers are still CPU-only here, so give them more cores than a shard gets (e.g.
 - [ ] Store artifacts under `build_id/attempt/`, so a stale attempt can never overwrite the winning one
 - [ ] Publish order: upload the index, then write the manifest (build ID, attempt, checksum, parameters, recall), then mark the job complete under the fencing guard
 - [ ] Recall gate: run held-out queries and compare recall@10 with ground truth. Below the threshold, mark the build failed with a reason.
-- [ ] Keep OLTP simulated, but as a CPU-burning loop instead of a sleep, so it competes with local builds for real
+- [ ] Keep follow-up jobs simulated, but as a CPU-burning loop instead of a sleep, so they compete with local builds for real
 
 ### Calibration
 
@@ -308,7 +357,7 @@ Add a real GPU build path, run it on a small cloud GPU node pool for a few hours
 
 ## Phase 6 (optional): Kubernetes-native dispatch
 
-Rebuild the dispatch side with a custom resource, an operator and Kueue, then write down what each hand-built piece became. The placement policy stays on top: Kueue handles admission, quota and priority, but it has no idea that a shard's OLTP job is waiting, so it can't make the CPU-versus-GPU decision.
+Rebuild the dispatch side with a custom resource, an operator and Kueue, then write down what each hand-built piece became. The placement policy stays on top: Kueue handles admission, quota and priority, but it has no idea what follow-up work is waiting on a shard, so it can't make the CPU-versus-GPU decision.
 
 | Hand-built (Phases 1–5) | Kubernetes-native | Note |
 | --- | --- | --- |
