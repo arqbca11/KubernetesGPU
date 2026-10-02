@@ -106,11 +106,12 @@ CREATE TABLE builds (
   dim          int NOT NULL,
   mem_bytes    bigint NOT NULL,         -- modeled GPU memory need
   placement    text NOT NULL,           -- 'local' or 'gpu'
-  state        text NOT NULL,           -- queued, leased, done, failed
+  state        text NOT NULL,           -- gpu: queued, leased, done, failed; local: running, done, failed
   priority     double precision NOT NULL DEFAULT 0,
   attempt      int NOT NULL DEFAULT 0,  -- fencing token, +1 on every claim
   lease_owner  text,
   lease_until  timestamptz,
+  fail_reason  text,
   enqueued_at  timestamptz NOT NULL DEFAULT now(),
   started_at   timestamptz,
   finished_at  timestamptz
@@ -137,7 +138,7 @@ CREATE TABLE workers (
 );
 ```
 
-Local builds also get a `builds` row (`placement = 'local'`), written by the shard, so every build in a round is visible in one place.
+Local builds also get a `builds` row (`placement = 'local'`, state `running` then `done`), so every build in a round is visible in one place. The migration in `db/migrations/` is the authoritative version of this schema and adds `CHECK` constraints.
 
 ### The four operations
 
@@ -164,7 +165,7 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 ### Steps
 
-- [ ] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
+- [x] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
 - [ ] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
 - [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
 - [ ] Reaper in the scheduler

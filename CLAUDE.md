@@ -70,5 +70,8 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | Task | Command |
 | --- | --- |
 | Check toolchain | `go version && python3.12 --version && uv --version && psql --version && docker compose version` |
+| Compile and vet Go | `go build ./... && go vet ./...` |
+| Go tests (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh` (extra args pass through, e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`) |
+| Go unit tests only, no database | `go test ./...` (database tests skip themselves when `TEST_DATABASE_URL` is unset) |
 
-_(build, test and run commands are added as components land)_
+The Go module is `github.com/arqbca11/KubernetesGPU`, one module at the repo root covering `db/`, `scheduler/`, `shard/` and the Go parts of `experiments/`.
