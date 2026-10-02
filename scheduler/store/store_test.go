@@ -48,6 +48,7 @@ func submit(t *testing.T, s *Store, round int64, shard int32, placement string, 
 	if err != nil || !ins {
 		t.Fatalf("submit %s: inserted=%v err=%v", id, ins, err)
 	}
+	t.Logf("submitted build %s: placement=%s priority=%v mem=%d", id, placement, priority, mem)
 	return id
 }
 
@@ -66,6 +67,30 @@ func expireLease(t *testing.T, pool *pgxpool.Pool, id string) {
 		`UPDATE builds SET lease_until = now() - interval '1 second' WHERE build_id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("  (test) forced lease of %s into the past, as if the worker had stopped renewing", id)
+}
+
+// row logs the build row as Postgres has it right now.
+func row(t *testing.T, pool *pgxpool.Pool, id string) {
+	t.Helper()
+	var st, placement string
+	var attempt int32
+	var owner *string
+	var until *time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT state, placement, attempt, lease_owner, lease_until FROM builds WHERE build_id = $1`, id).
+		Scan(&st, &placement, &attempt, &owner, &until); err != nil {
+		t.Fatal(err)
+	}
+	o, u := "-", "-"
+	if owner != nil {
+		o = *owner
+	}
+	if until != nil {
+		u = time.Until(*until).Round(time.Second).String()
+	}
+	t.Logf("  [db] build %s: placement=%s state=%-7s attempt=%d lease_owner=%s lease_expires_in=%s",
+		id, placement, st, attempt, o, u)
 }
 
 func TestClaimOrdersByPriorityThenAge(t *testing.T) {
@@ -77,7 +102,7 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 	mid := submit(t, s, r, 3, "gpu", 3, 1<<20)
 
 	var got []string
-	for range 3 {
+	for i := range 3 {
 		c, ok, err := s.Claim(ctx, "w", 1<<30, lease)
 		if err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
@@ -85,6 +110,7 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 		if c.Attempt != 1 {
 			t.Fatalf("first claim of %s: attempt=%d", c.BuildID, c.Attempt)
 		}
+		t.Logf("claim #%d by worker w -> %s (attempt %d)", i+1, c.BuildID, c.Attempt)
 		got = append(got, c.BuildID)
 	}
 	want := []string{high, mid, low}
@@ -93,9 +119,11 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 			t.Fatalf("claim order: got %v want %v", got, want)
 		}
 	}
+	t.Logf("order was %v: priority 5, then 3, then 1, as expected", got)
 	if _, ok, _ := s.Claim(ctx, "w", 1<<30, lease); ok {
 		t.Fatal("claim on empty queue returned a build")
 	}
+	t.Log("claim #4 on the empty queue -> nothing, as expected")
 }
 
 func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
@@ -104,8 +132,13 @@ func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 	r, _ := s.CreateRound(ctx, "test", 1)
 	const n = 20
 	for i := range int32(n) {
-		submit(t, s, r, i, "gpu", 0, 1<<20)
+		if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(i, r), RoundID: r, ShardID: i,
+			NVectors: 1000, Dim: 128, MemBytes: 1 << 20, Placement: "gpu"}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	t.Logf("submitted %d gpu builds, all priority 0", n)
+	t.Logf("starting 8 workers that claim in a loop until the queue is empty")
 
 	var mu sync.Mutex
 	seen := map[string]int{}
@@ -138,6 +171,7 @@ func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 			t.Fatalf("build %s claimed %d times", id, k)
 		}
 	}
+	t.Logf("all %d builds claimed, each exactly once: FOR UPDATE SKIP LOCKED kept the workers apart", n)
 }
 
 // The core of Phase 1: a paused or dead worker's late writes are rejected.
@@ -151,61 +185,92 @@ func TestFencingAfterReap(t *testing.T) {
 	if !ok || c1.Attempt != 1 {
 		t.Fatalf("first claim: ok=%v attempt=%d", ok, c1.Attempt)
 	}
+	t.Logf("worker-1 claims -> attempt %d, lease %s", c1.Attempt, lease)
+	row(t, pool, id)
 
 	// Lease still live: nothing to reap.
-	if n, _ := s.Reap(ctx); n != 0 {
+	n, _ := s.Reap(ctx)
+	if n != 0 {
 		t.Fatalf("reaped %d live leases", n)
 	}
+	t.Logf("reaper runs while the lease is live -> %d rows changed", n)
 
 	// worker-1 goes silent (kill -9 or SIGSTOP). Lease expires.
+	t.Log("worker-1 stops renewing (kill -9, or SIGSTOP)")
 	expireLease(t, pool, id)
-	if n, _ := s.Reap(ctx); n != 1 {
+	row(t, pool, id)
+	n, _ = s.Reap(ctx)
+	if n != 1 {
 		t.Fatalf("reap: got %d want 1", n)
 	}
+	t.Logf("reaper runs after expiry -> %d row back to queued", n)
 	if st, _ := state(t, pool, id); st != "queued" {
 		t.Fatalf("after reap: state=%s", st)
 	}
+	row(t, pool, id)
 	// Reaper is idempotent.
-	if n, _ := s.Reap(ctx); n != 0 {
+	n, _ = s.Reap(ctx)
+	if n != 0 {
 		t.Fatalf("second reap changed %d rows", n)
 	}
+	t.Logf("reaper runs again -> %d rows changed (idempotent)", n)
 
 	c2, ok, _ := s.Claim(ctx, "worker-2", 1<<30, lease)
 	if !ok || c2.Attempt != 2 || c2.BuildID != id {
 		t.Fatalf("second claim: ok=%v attempt=%d id=%s", ok, c2.Attempt, c2.BuildID)
 	}
+	t.Logf("worker-2 claims -> attempt %d (the fencing token moved on)", c2.Attempt)
+	row(t, pool, id)
 
 	// worker-1 wakes up (SIGCONT) and tries to carry on with attempt 1.
-	if ok, _ := s.Renew(ctx, id, c1.Attempt, lease); ok {
+	t.Logf("worker-1 wakes up (SIGCONT) still holding attempt %d and tries to carry on:", c1.Attempt)
+	ok, _ = s.Renew(ctx, id, c1.Attempt, lease)
+	if ok {
 		t.Fatal("stale renew succeeded")
 	}
-	if ok, _ := s.Complete(ctx, id, c1.Attempt); ok {
+	t.Logf("  renew(attempt %d)    -> rejected (0 rows)", c1.Attempt)
+	ok, _ = s.Complete(ctx, id, c1.Attempt)
+	if ok {
 		t.Fatal("stale complete succeeded")
 	}
-	if ok, _ := s.Fail(ctx, id, c1.Attempt, "late"); ok {
+	t.Logf("  complete(attempt %d) -> rejected (0 rows)", c1.Attempt)
+	ok, _ = s.Fail(ctx, id, c1.Attempt, "late")
+	if ok {
 		t.Fatal("stale fail succeeded")
 	}
+	t.Logf("  fail(attempt %d)     -> rejected (0 rows)", c1.Attempt)
 	if st, a := state(t, pool, id); st != "leased" || a != 2 {
 		t.Fatalf("stale writes changed the row: state=%s attempt=%d", st, a)
 	}
+	row(t, pool, id)
 
 	// The real owner proceeds.
-	if ok, _ := s.Renew(ctx, id, c2.Attempt, lease); !ok {
+	ok, _ = s.Renew(ctx, id, c2.Attempt, lease)
+	if !ok {
 		t.Fatal("live renew rejected")
 	}
-	if ok, _ := s.Complete(ctx, id, c2.Attempt); !ok {
+	t.Logf("worker-2 renew(attempt %d)    -> accepted", c2.Attempt)
+	ok, _ = s.Complete(ctx, id, c2.Attempt)
+	if !ok {
 		t.Fatal("live complete rejected")
 	}
+	t.Logf("worker-2 complete(attempt %d) -> accepted", c2.Attempt)
 	if st, _ := state(t, pool, id); st != "done" {
 		t.Fatalf("after complete: state=%s", st)
 	}
+	row(t, pool, id)
 	// Completing twice is a no-op, and the done row is never reaped.
-	if ok, _ := s.Complete(ctx, id, c2.Attempt); ok {
+	ok, _ = s.Complete(ctx, id, c2.Attempt)
+	if ok {
 		t.Fatal("second complete succeeded")
 	}
-	if n, _ := s.Reap(ctx); n != 0 {
+	t.Log("worker-2 completes again       -> rejected (already done)")
+	n, _ = s.Reap(ctx)
+	if n != 0 {
 		t.Fatalf("reap touched a done build")
 	}
+	t.Logf("reaper runs on the done build -> %d rows changed", n)
+	t.Log("result: the build finished exactly once, by worker-2")
 }
 
 func TestReleaseReturnsToQueueAndFences(t *testing.T) {
@@ -215,19 +280,24 @@ func TestReleaseReturnsToQueueAndFences(t *testing.T) {
 	id := submit(t, s, r, 1, "gpu", 0, 1<<20)
 
 	c1, _, _ := s.Claim(ctx, "w1", 1<<30, lease)
+	t.Logf("w1 claims -> attempt %d", c1.Attempt)
 	if ok, _ := s.Release(ctx, id, c1.Attempt); !ok {
 		t.Fatal("release rejected")
 	}
+	t.Log("w1 gets SIGTERM and releases the build instead of finishing")
 	if st, _ := state(t, pool, id); st != "queued" {
 		t.Fatalf("after release: state=%s", st)
 	}
+	row(t, pool, id)
 	c2, _, _ := s.Claim(ctx, "w2", 1<<30, lease)
 	if c2.Attempt != 2 {
 		t.Fatalf("attempt after release+claim = %d", c2.Attempt)
 	}
+	t.Logf("w2 claims -> attempt %d", c2.Attempt)
 	if ok, _ := s.Complete(ctx, id, c1.Attempt); ok {
 		t.Fatal("old owner completed after release")
 	}
+	t.Logf("w1 complete(attempt %d) -> rejected", c1.Attempt)
 }
 
 func TestClaimRespectsWorkerMemory(t *testing.T) {
@@ -242,10 +312,12 @@ func TestClaimRespectsWorkerMemory(t *testing.T) {
 	if !ok || c.BuildID != small {
 		t.Fatalf("8 GiB worker claimed %q ok=%v, want %s", c.BuildID, ok, small)
 	}
+	t.Logf("8 GiB worker claims -> %s (skipped the 16 GiB build that was first in line)", c.BuildID)
 	c, ok, _ = s.Claim(ctx, "big-gpu", 24<<30, lease)
 	if !ok || c.BuildID != big {
 		t.Fatalf("24 GiB worker claimed %q ok=%v, want %s", c.BuildID, ok, big)
 	}
+	t.Logf("24 GiB worker claims -> %s", c.BuildID)
 }
 
 func TestDuplicateSubmitIsNoop(t *testing.T) {
@@ -256,13 +328,18 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 	if ins, err := s.SubmitBuild(ctx, b); err != nil || !ins {
 		t.Fatalf("first submit: %v %v", ins, err)
 	}
+	t.Logf("submitted %s as gpu, priority 7", b.BuildID)
 	c, _, _ := s.Claim(ctx, "w", 1<<30, lease)
+	t.Logf("worker claims it -> attempt %d", c.Attempt)
+	row(t, pool, b.BuildID)
 
 	b.Priority = 99
 	b.Placement = "local"
-	if ins, err := s.SubmitBuild(ctx, b); err != nil || ins {
+	ins, err := s.SubmitBuild(ctx, b)
+	if err != nil || ins {
 		t.Fatalf("second submit: inserted=%v err=%v", ins, err)
 	}
+	t.Logf("shard resubmits the same build_id as local, priority 99 -> inserted=%v", ins)
 	var prio float64
 	var placement string
 	st, a := state(t, pool, b.BuildID)
@@ -270,6 +347,8 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 	if st != "leased" || a != c.Attempt || prio != 7 || placement != "gpu" {
 		t.Fatalf("resubmit changed the row: state=%s attempt=%d priority=%v placement=%s", st, a, prio, placement)
 	}
+	row(t, pool, b.BuildID)
+	t.Log("row unchanged: still gpu, priority 7, leased to the worker")
 }
 
 func TestLocalBuildsAreNeverReaped(t *testing.T) {
@@ -280,18 +359,25 @@ func TestLocalBuildsAreNeverReaped(t *testing.T) {
 	if st, _ := state(t, pool, id); st != "running" {
 		t.Fatalf("local build state=%s, want running", st)
 	}
+	row(t, pool, id)
 	if _, ok, _ := s.Claim(ctx, "w", 1<<40, lease); ok {
 		t.Fatal("a worker claimed a local build")
 	}
-	if n, _ := s.Reap(ctx); n != 0 {
+	t.Log("a worker tries to claim -> nothing (local builds are not in the queue)")
+	n, _ := s.Reap(ctx)
+	if n != 0 {
 		t.Fatalf("reap touched a local build")
 	}
+	t.Logf("reaper runs -> %d rows changed (local builds have no lease)", n)
 	if ok, _ := s.CompleteLocal(ctx, id); !ok {
 		t.Fatal("complete local rejected")
 	}
+	t.Log("shard reports the local build done -> accepted")
 	if ok, _ := s.CompleteLocal(ctx, id); ok {
 		t.Fatal("second complete local succeeded")
 	}
+	t.Log("shard reports it again -> rejected")
+	row(t, pool, id)
 }
 
 func TestHeartbeatAndLargestLiveWorker(t *testing.T) {
@@ -300,16 +386,21 @@ func TestHeartbeatAndLargestLiveWorker(t *testing.T) {
 	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 0 {
 		t.Fatalf("no workers, got %d", m)
 	}
+	t.Log("no workers registered -> largest live memory is 0")
 	s.Heartbeat(ctx, "a", 8<<30)  //nolint:errcheck
 	s.Heartbeat(ctx, "b", 24<<30) //nolint:errcheck
+	t.Log("workers a (8 GiB) and b (24 GiB) heartbeat")
 	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 24<<30 {
 		t.Fatalf("largest live = %d", m)
 	}
+	t.Log("largest live memory within 1 minute -> 24 GiB")
 	// b goes stale.
 	pool.Exec(ctx, `UPDATE workers SET last_seen = now() - interval '10 minutes' WHERE worker_id = 'b'`) //nolint:errcheck
+	t.Log("  (test) b's last_seen pushed 10 minutes into the past, as if it had died")
 	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 8<<30 {
 		t.Fatalf("largest live after b stale = %d", m)
 	}
+	t.Log("largest live memory within 1 minute -> 8 GiB (b no longer counts)")
 	// Heartbeat is an upsert.
 	if err := s.Heartbeat(ctx, "a", 8<<30); err != nil {
 		t.Fatal(err)

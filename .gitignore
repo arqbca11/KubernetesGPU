@@ -20,3 +20,4 @@ experiments/results/*.png
 docs/motivation.md
 docs/study-notes.md
 .obsidian/
+test-logs/history/

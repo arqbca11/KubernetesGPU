@@ -186,7 +186,7 @@ Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is lat
 | `db/migrate.go` | `db.Migrate(ctx, pool)`: embeds `migrations/*.sql`, applies unapplied files in order inside transactions, records them in `schema_migrations`, holds advisory lock `0x4B475055` for the run. |
 | `scheduler/store/store.go` | `Store` with `CreateRound`, `SubmitBuild`, `Claim`, `Renew`, `Complete`, `Fail`, `Release`, `CompleteLocal`, `Reap`, `Heartbeat`, `LargestLiveWorkerMem`. Every post-claim write is guarded by `build_id AND attempt AND state = 'leased'` and returns a bool: false means the caller lost ownership. |
 | `scheduler/store/store_test.go` | Integration tests, skipped without `TEST_DATABASE_URL`. |
-| `scripts/test-db.sh` | Starts `postgres:17` in a container on a random port, runs `go test`, removes the container. |
+| `scripts/test-db.sh` | Starts `postgres:17` in a container on a random port, runs `go test`, removes the container. Writes `test-logs/latest.log` (tracked, so the last run is visible on GitHub) and a timestamped copy in `test-logs/history/` (gitignored). The log has a header (date, commit, versions), the narrated test output, and the container's Docker events. |
 
 What the tests prove, and which invariant each covers:
 
