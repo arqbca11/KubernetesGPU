@@ -1,6 +1,6 @@
 # Shard-to-GPU index build scheduler
 
-A coordinator that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has finished its build and all of its follow-up jobs. One slow shard holds up the whole round.
+A scheduler that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has finished its build and all of its follow-up jobs. One slow shard holds up the whole round.
 
 Start small: the default configuration is **6 shards and 2 GPU workers**. Scaling to 50 shards is a config change, done once the small setup runs end to end.
 
@@ -8,14 +8,14 @@ Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. Read the 
 
 ## Current phase
 
-**Phase 1: coordinator with fake jobs, Docker Compose, no Kubernetes.**
+**Phase 1: scheduler with fake jobs, Docker Compose, no Kubernetes.**
 Update this line when a phase is done. Don't start work that belongs to a later phase unless asked.
 
 ## Architecture
 
 | Component | Role | Language |
 | --- | --- | --- |
-| `coordinator/` | Decides local vs GPU per build, owns the queue, reaps expired leases, tracks rounds | Go |
+| `scheduler/` | Decides local vs GPU per build, owns the queue, reaps expired leases, tracks rounds | Go |
 | `shard/` | Simulates N shards (goroutines), each with a sequential CPU queue for local builds and follow-up jobs | Go |
 | `worker/` | Pulls GPU jobs, renews its lease, runs the build, publishes the result | Python |
 | `db/migrations/` | Postgres schema; Postgres is the only source of truth | SQL |
@@ -24,8 +24,8 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 
 ## Invariants (never break these)
 
-1. **All shared state lives in Postgres.** Coordinator, shards and workers keep no state that must survive a restart.
-2. **Workers pull; the coordinator never pushes jobs to workers.** A worker claims with `FOR UPDATE SKIP LOCKED`.
+1. **All shared state lives in Postgres.** Scheduler, shards and workers keep no state that must survive a restart.
+2. **Workers pull; the scheduler never pushes jobs to workers.** A worker claims with `FOR UPDATE SKIP LOCKED`.
 3. **Every write to a `builds` row after the claim is a conditional `UPDATE` guarded by `build_id` and `attempt`.** No unconditional writes. Zero rows updated means the caller lost ownership and must stop.
 4. **`attempt` increments on every claim.** It is the fencing token.
 5. **The reaper is idempotent:** it only moves expired leases back to `queued`, and running it twice changes nothing.
@@ -51,7 +51,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 - Python: type hints, a pinned lockfile, `psycopg` for Postgres.
 - Every log line about a build carries `build_id`, `attempt` and `round_id`.
 - Prometheus metric names follow `docs/roadmap.md` (Phase 2, Metrics).
-- Correctness tests come before features: the failure tests in the roadmap (kill -9, SIGSTOP past lease expiry, coordinator restart, duplicate submit) must pass before a phase is done.
+- Correctness tests come before features: the failure tests in the roadmap (kill -9, SIGSTOP past lease expiry, scheduler restart, duplicate submit) must pass before a phase is done.
 
 ## Working agreement
 

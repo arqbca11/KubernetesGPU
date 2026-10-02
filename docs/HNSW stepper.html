@@ -1,0 +1,496 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>HNSW stepper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  color-scheme:light;
+  --bg:#F1F2EF; --card:#FFFFFF; --ink:#1C2630; --muted:#5B6670; --line:#C9D0D3;
+  --follower:#84909A; --candidate:#B7800E; --leader:#1F6B5C;
+  --t1:#3E63A6; --t2:#93407E; --cut:#B23A2E; --on-role:#FFFFFF; --rule-bg:#E4E8E4;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#151A1F; --card:#1D242B; --ink:#E4E8EA; --muted:#9AA5AD; --line:#34414B;
+    --follower:#7F8C96; --candidate:#E0A93A; --leader:#4FB39C;
+    --t1:#7C9DE0; --t2:#D07BBC; --cut:#E2685B; --on-role:#10161B; --rule-bg:#202932;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#151A1F; --card:#1D242B; --ink:#E4E8EA; --muted:#9AA5AD; --line:#34414B;
+  --follower:#7F8C96; --candidate:#E0A93A; --leader:#4FB39C;
+  --t1:#7C9DE0; --t2:#D07BBC; --cut:#E2685B; --on-role:#10161B; --rule-bg:#202932;
+}
+*,*::before,*::after{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:"Schibsted Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased;
+}
+code{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.88em}
+.wrap{max-width:1160px; margin:0 auto; padding:40px 28px 56px}
+header h1{font-size:clamp(28px,4vw,40px); line-height:1.1; font-weight:700; letter-spacing:-0.02em; margin:0 0 10px; text-wrap:balance}
+header p{margin:0; color:var(--muted); font-size:17px; line-height:1.5; max-width:62ch}
+.stage{display:grid; grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr); gap:44px; margin-top:32px; align-items:start}
+figure{margin:0; min-width:0}
+.scroll{overflow-x:auto}
+.scroll > svg{width:100%; height:auto; display:block}
+.legend{display:flex; flex-wrap:wrap; gap:8px 20px; margin-top:14px; color:var(--muted); font-size:13px}
+.legend span{display:inline-flex; align-items:center; gap:7px}
+.legend svg{flex:none}
+.panel{position:sticky; top:calc(env(safe-area-inset-top,0px) + 20px)}
+.count{margin:0 0 8px; color:var(--muted); font-size:14px}
+.panel h2{font-size:26px; line-height:1.2; font-weight:650; letter-spacing:-0.01em; margin:0 0 14px; text-wrap:balance}
+.panel p.text{font-size:16.5px; line-height:1.58; margin:0 0 20px; max-width:60ch}
+.rule{background:var(--rule-bg); border-radius:10px; padding:14px 16px; margin-bottom:24px}
+.rule h3{margin:0 0 6px; font-size:13px; font-weight:600; color:var(--muted)}
+.rule p{margin:0; font-size:15px; line-height:1.5}
+.dots{display:flex; flex-wrap:wrap; gap:7px; margin-bottom:16px}
+.controls{display:flex; align-items:center; gap:10px}
+button{font:inherit; cursor:pointer}
+.btn{border-radius:8px; padding:9px 16px; font-size:15px; font-weight:600; border:1.5px solid var(--ink); background:transparent; color:var(--ink)}
+.btn.primary{background:var(--ink); color:var(--bg)}
+.btn:disabled{opacity:.35; cursor:default}
+.btn:focus-visible,.dot:focus-visible{outline:2px solid var(--leader); outline-offset:3px}
+.dot{width:10px; height:10px; padding:0; border-radius:50%; border:1.5px solid var(--muted); background:transparent}
+.dot[aria-current="step"]{background:var(--ink); border-color:var(--ink)}
+footer{margin-top:40px; color:var(--muted); font-size:13px; line-height:1.5; max-width:90ch}
+
+/* SVG */
+.plane{fill:var(--card); stroke:var(--line); stroke-width:1.5}
+.axis{fill:var(--muted); font-size:10.5px}
+.link0{stroke:var(--line); stroke-width:1.4}
+.link1{stroke:var(--follower); stroke-width:2}
+.link2{stroke:var(--ink); stroke-width:2.75}
+.ghost{fill:var(--line)}
+.node{fill:var(--bg); stroke:var(--follower); stroke-width:1.5}
+.node.touched{stroke:var(--candidate); stroke-width:2.5}
+.node.result{fill:var(--leader); stroke:var(--leader); stroke-width:2}
+.node.fail{fill:var(--rule-bg)}
+.node.newnode{stroke:var(--ink); stroke-width:2.75}
+.slash{stroke:var(--follower); stroke-width:1.5}
+.ring{fill:none; stroke:var(--follower); stroke-width:1.1}
+.missring{fill:none; stroke:var(--cut); stroke-width:2; stroke-dasharray:4 3}
+.nlabel{fill:var(--muted); font-size:11px; font-weight:500}
+.nlabel.hot{fill:var(--ink); font-weight:700}
+.nlabel.bad{fill:var(--cut); font-weight:700}
+.qstar{fill:var(--t2)}
+.qlabel{fill:var(--t2); font-size:13px; font-weight:700}
+.wcircle{fill:none; stroke:var(--t1); stroke-width:1.5; stroke-dasharray:6 5}
+.arr{fill:none}
+.arr.hop{stroke:var(--ink); stroke-width:2.25}
+.arr.look{stroke:var(--ink); stroke-width:1.5}
+.arr.past{stroke:var(--follower); stroke-width:1.25}
+.arr.new{stroke:var(--leader); stroke-width:2.5}
+.arr.skip{stroke:var(--cut); stroke-width:1.75; stroke-dasharray:5 4}
+.ah-ink{fill:var(--ink)} .ah-muted{fill:var(--follower)} .ah-new{fill:var(--leader)} .ah-bad{fill:var(--cut)}
+.floor{fill:var(--rule-bg); stroke:var(--line); stroke-width:1.25}
+.floor.on{fill:var(--card); stroke:var(--leader); stroke-width:2.25}
+.floortext{fill:var(--muted); font-size:12.5px; font-weight:500}
+.floortext.on{fill:var(--ink); font-weight:650}
+.box{fill:var(--card); stroke:var(--line); stroke-width:1.5}
+.notehead{fill:var(--muted); font-size:10.5px; font-weight:600; letter-spacing:.07em; text-transform:uppercase}
+.notetext{fill:var(--ink); font-size:12.5px}
+.notevalue{font-size:12.5px; font-weight:600}
+.mono{font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace; font-size:12px; font-weight:500}
+.itemnote{font-size:11.5px; font-weight:500}
+.tone-ink{fill:var(--ink)} .tone-good{fill:var(--leader)} .tone-bad{fill:var(--cut)} .tone-warn{fill:var(--candidate)} .tone-muted{fill:var(--muted)}
+.idot.good{fill:var(--leader)} .idot.warn{fill:none; stroke:var(--candidate); stroke-width:2} .idot.bad{fill:none; stroke:var(--cut); stroke-width:2; stroke-dasharray:3 2}
+.idot.ink{fill:var(--ink)} .idot.muted{fill:none; stroke:var(--follower); stroke-width:1.5}
+.fade{animation:fadeIn .35s ease-out both}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion: reduce){.fade{animation:none}}
+
+@media (max-width: 860px){
+  .wrap{padding:28px 16px 44px}
+  .stage{grid-template-columns:1fr; gap:24px}
+  .panel{position:static}
+  .scroll > svg{min-width:620px}
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>HNSW, one step at a time</h1>
+    <p>Twenty-four vectors in a plane stand in for 768-dimensional embeddings. Follow one query down the layers, see what <code>ef_search</code> trades, add a filter, then watch a new vector get inserted. Use the arrow keys or the buttons.</p>
+  </header>
+
+  <div class="stage">
+    <figure>
+      <div class="scroll">
+        <svg id="svg" viewBox="0 0 716 474" role="img" aria-labelledby="step-title">
+          <defs>
+            <marker id="ah-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ah-ink" d="M0 0 L10 5 L0 10 z"/></marker>
+            <marker id="ah-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ah-muted" d="M0 0 L10 5 L0 10 z"/></marker>
+            <marker id="ah-new" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ah-new" d="M0 0 L10 5 L0 10 z"/></marker>
+            <marker id="ah-bad" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ah-bad" d="M0 0 L10 5 L0 10 z"/></marker>
+            <clipPath id="planeclip"><rect x="6" y="6" width="460" height="460" rx="10"/></clipPath>
+          </defs>
+          <g id="layer-plane"></g>
+          <g id="layer-side"></g>
+        </svg>
+      </div>
+      <figcaption class="legend">
+        <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bg)" stroke="var(--follower)" stroke-width="1.5"/></svg>Vector</span>
+        <span><svg width="22" height="22"><circle cx="11" cy="11" r="5" fill="var(--bg)" stroke="var(--follower)" stroke-width="1.5"/><circle cx="11" cy="11" r="9" fill="none" stroke="var(--follower)" stroke-width="1.1"/></svg>One ring per higher layer it's on</span>
+        <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bg)" stroke="var(--candidate)" stroke-width="2.5"/></svg>Distance computed</span>
+        <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--leader)"/></svg>In the result set W</span>
+        <span><svg width="20" height="20"><circle cx="10" cy="10" r="8" fill="none" stroke="var(--cut)" stroke-width="2" stroke-dasharray="4 3"/></svg>True neighbor missed</span>
+        <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--rule-bg)" stroke="var(--follower)" stroke-width="1.5"/><line x1="4.5" y1="11.5" x2="11.5" y2="4.5" stroke="var(--follower)" stroke-width="1.5"/></svg>Fails the filter</span>
+        <span><svg width="16" height="16"><path d="M8 1 L9.9 5.6 L14.8 6 L11 9.2 L12.2 14 L8 11.4 L3.8 14 L5 9.2 L1.2 6 L6.1 5.6 Z" fill="var(--t2)"/></svg>Query q</span>
+        <span><svg width="26" height="10"><line x1="1" y1="5" x2="25" y2="5" stroke="var(--t1)" stroke-width="1.5" stroke-dasharray="5 4"/></svg>Circle at the worst distance in W</span>
+        <span><svg width="26" height="10"><line x1="1" y1="5" x2="25" y2="5" stroke="var(--ink)" stroke-width="2"/></svg>Move or expand</span>
+        <span><svg width="26" height="10"><line x1="1" y1="5" x2="25" y2="5" stroke="var(--follower)" stroke-width="1.5"/></svg>Earlier move</span>
+      </figcaption>
+    </figure>
+
+    <section class="panel" aria-live="polite">
+      <p class="count">Step <span id="num">1</span> of <span id="total"></span></p>
+      <h2 id="step-title"></h2>
+      <p class="text" id="step-text"></p>
+      <div class="rule">
+        <h3>Rule in play</h3>
+        <p id="step-rule"></p>
+      </div>
+      <div class="dots" id="dots" role="group" aria-label="Jump to step"></div>
+      <nav class="controls" aria-label="Steps">
+        <button class="btn" id="prev">Back</button>
+        <button class="btn primary" id="next">Next</button>
+      </nav>
+    </section>
+  </div>
+
+  <footer>The graph, the level draws and every distance on this page come from running HNSW for real: 24 random points inserted in order, M = 3, M0 = 6, mL = 1/ln 3, and the neighbor-selection heuristic from Malkov &amp; Yashunin (2018). Distances are Euclidean in the plane's 0–100 units.</footer>
+</div>
+
+<script>
+(function(){
+  const NS = 'http://www.w3.org/2000/svg';
+  // ---- Graph (computed offline; see footer) ----
+  const P = [[89.3,75.4],[65.8,39.8],[56.9,11.8],[14.9,70.2],[79.1,30.2],[77.9,60.2],[17.6,26.2],[43.8,16.2],[6.9,37.2],[46.5,78.5],[6.1,50.4],[66.1,73.3],[30.3,9.0],[82.6,13.6],[44.5,51.4],[65.8,24.0],[31.6,39.4],[90.5,38.9],[16.6,84.2],[29.6,58.5],[90.4,54.8],[57.5,89.4],[6.2,19.7],[50.8,28.7],[26,70]];
+  const LVL = [0,0,0,0,0,0,1,0,0,0,0,0,1,2,1,0,0,0,0,2,0,1,0,0,0];
+  const NB = {
+    0:[[1,5],[15,5,14],[1,4,6,7,13,15],[18,19,10],[1,2,13,15,17],[0,1,9,11,17,20],[8,16,12,22],[2,6,12,16,23],[6,3,10],[21,19],[8,3],[5,9,21],[7,6],[4,2],[1,9,6,16,19],[4,2,1,23],[14,6,7,23],[4,5,20],[3,9],[14,3,9],[5,17],[9,11],[6],[7,15,16],[3,19,9]],
+    1:{6:[12,14,19],12:[6,13],13:[12,14],14:[19,21,13],19:[14,6],21:[14]},
+    2:{13:[19],19:[13]}
+  };
+  const Q = [17,47];
+  const S = 4.4, O = 16;
+  const px = p => ({x:O + p[0]*S, y:O + p[1]*S});
+  const IN_STOCK = new Set([2,3,5,7,12,15,20]);
+
+  const STEPS = [
+    {
+      title:'Twenty-four vectors and a query',
+      text:'Each dot is a vector. Real embeddings have hundreds of dimensions, but two are enough to see the mechanics. The exact way to find the 3 nearest to q is to compute all 24 distances and keep the best three. At 100 million 768-dimensional vectors, that is about 77 billion multiply-adds for every query.',
+      rule:'An approximate nearest neighbor (ANN) index gives up exactness in order to touch far fewer vectors. It is judged by recall@k: how many of the true k nearest it actually returns.',
+      view:0, links:[], stack:[], q:true,
+      state:{head:'Exact scan', kv:[['vectors','24','ink'],['distances computed','24 of 24','ink'],['k','3','ink']]}
+    },
+    {
+      title:'Link each vector to a few neighbors',
+      text:'Layer 0 holds every vector, each linked to a few nearby ones. A vector gets <code>M</code> = 3 links when it is inserted, and can collect up to <code>M0</code> = 2M = 6 as later vectors link back to it. Each node stores its own list, so a link can exist in one direction only. They are drawn here without arrows.',
+      rule:'The graph only has to be navigable: from any node, some neighbor should be closer to wherever the search is heading. It does not need to be a complete nearest-neighbor graph.',
+      view:0, links:[0], stack:[0], q:true,
+      state:{head:'Layer 0', kv:[['nodes','24','ink'],['links per insert (M)','3','ink'],['cap per node (M0)','6','ink']]}
+    },
+    {
+      title:'Greedy routing on a flat graph',
+      text:'Start from an entry node, here 13. Compute the distance from q to each of its neighbors, move to the closest one if it beats the current node, and repeat. The walk ends at 10, where no neighbor is closer. That is the true nearest, reached in 4 hops and 13 distance computations.',
+      rule:'Greedy routing only guarantees a local minimum. On a single layer the walk also gets longer as the data grows: the HNSW paper puts flat navigable small-world graphs at polylogarithmic search cost, and the layered version brings it down to logarithmic.',
+      view:0, links:[0], stack:[0], q:true,
+      arrows:[[13,2,'hop'],[2,6,'hop'],[6,8,'hop'],[8,10,'hop']],
+      touched:[1,2,3,4,6,7,8,12,13,15,16,22], result:[10],
+      state:{head:'Greedy walk, layer 0', kv:[['hops','4','ink'],['distances computed','13 of 24','ink']],
+        lists:[{t:'Path', items:[[13,73.6,'muted'],[2,53.2,'muted'],[6,20.8,'muted'],[8,14.1,'muted'],[10,11.4,'good']]}]}
+    },
+    {
+      title:'Stack sparser layers on top',
+      text:'At insertion, each vector draws a top level ℓ = ⌊−ln(U) · mL⌋ with U uniform on (0, 1] and mL = 1/ln M. With M = 3, a third of vectors reach layer 1 and a ninth reach layer 2. This build put 6 on layer 1 (6, 12, 13, 14, 19, 21) and 2 on layer 2 (13 and 19). A vector on layer ℓ also appears on every layer below it, with separate links on each.',
+      rule:'Upper layers are sparse, so their links are long. A search from the top covers most of the distance in a few hops, and each lower layer refines the position. It works like a skip list, built on proximity instead of sort order.',
+      view:1, links:[1,2], stack:[1,2], q:true,
+      state:{head:'Level draw, M = 3', kv:[['layer 2','2 nodes','ink'],['  expected','2.7','muted'],['layer 1','6 nodes','ink'],['  expected','8','muted'],['layer 0','24 nodes','ink']]}
+    },
+    {
+      title:'Enter at the top and take one long hop',
+      text:'Search starts at the entry point, 13, the first node that reached the top layer. On layer 2 the search keeps a single best candidate. Node 13 is 73.6 from q. Its only neighbor, 19, is 17.1 away, so the search moves there. The only neighbor of 19 is 13, which is already visited, so layer 2 is done.',
+      rule:'The entry point is a fixed node recorded in the index. It changes only when an insert draws a level above the current top.',
+      view:2, links:[2], stack:[2], q:true,
+      arrows:[[13,19,'hop']], touched:[13], result:[19],
+      state:{head:'Layer 2 · ef = 1', kv:[['distances computed','2','ink']], lists:[{t:'Best so far', items:[[19,17.1,'good']]}]}
+    },
+    {
+      title:'Layer 1: nothing closer, so go down',
+      text:'The search carries 19 down to layer 1 and checks its neighbors there: 14 at 27.8 and 6 at 20.8. Neither beats 17.1, so 19 is already the local minimum on this layer. It becomes the entry point for layer 0.',
+      rule:'Every layer above 0 is searched greedily with a single candidate (ef = 1). Only the bottom layer runs the wider search.',
+      view:1, links:[1], stack:[1], q:true,
+      arrows:[[13,19,'past'],[19,14,'look'],[19,6,'look']], touched:[13,14,6], result:[19],
+      state:{head:'Layer 1 · ef = 1', kv:[['distances computed','4','ink']], lists:[{t:'Best so far', items:[[19,17.1,'good']]},{t:'Checked', items:[[6,20.8,'warn'],[14,27.8,'warn']]}]}
+    },
+    {
+      title:'Layer 0: a beam of ef candidates',
+      text:'The search now keeps two sets. C holds candidates to expand, nearest first. W holds the best <code>ef_search</code> = 3 found so far. Expanding 19 adds 14 and 3 to both sets. Node 9, at 43.2, is worse than everything in a full W, so it is dropped. Next the search expands 3, the nearest candidate. Node 18 is too far, but 10 at 11.4 enters W and pushes 14 out.',
+      rule:'A neighbor joins C and W only if W has room or the neighbor beats the worst result in W. The dashed circle marks that worst distance, and only nodes inside it get admitted.',
+      view:0, links:[0], stack:[0], q:true, circle:23.3,
+      arrows:[[19,14,'look'],[19,3,'look'],[19,9,'look'],[3,18,'look'],[3,10,'look']],
+      touched:[13,6,14,9,18], result:[10,19,3],
+      state:{head:'Layer 0 · ef_search = 3', kv:[['expanded','19, 3','ink'],['distances computed','8','ink']],
+        lists:[{t:'W · results', items:[[10,11.4,'good'],[19,17.1,'good'],[3,23.3,'good']]},{t:'C · to expand', items:[[10,11.4,'ink'],[14,27.8,'warn']]}]}
+    },
+    {
+      title:'Stop when the frontier leaves the circle',
+      text:'Expanding 10 finds 8 at 14.1, which pushes 3 out of W. Expanding 8 reaches 6, but 20.8 falls outside the shrunken circle. The nearest remaining candidate is 14 at 27.8, farther than the worst in W at 17.1. The search stops and returns 10, 8 and 19, after computing 9 of the 24 distances.',
+      rule:'The stop rule is a bet that a node outside the circle will not lead back inside it. On a good graph the bet usually pays. Recall is lost when it does not.',
+      view:0, links:[0], stack:[0], q:true, circle:17.1,
+      arrows:[[19,14,'past'],[19,3,'past'],[19,9,'past'],[3,18,'past'],[3,10,'past'],[10,8,'look'],[8,6,'look']],
+      touched:[13,6,14,9,18,3], result:[10,8,19],
+      state:{head:'Layer 0 · ef_search = 3', kv:[['expanded','19, 3, 10, 8','ink'],['distances computed','9 of 24','ink']],
+        lists:[{t:'W · returned', items:[[10,11.4,'good'],[8,14.1,'good'],[19,17.1,'good']]},{t:'C · stopped at', items:[[14,27.8,'warn']]}]}
+    },
+    {
+      title:'Check against the exact answer',
+      text:'The exact top 3 are 10, 8 and 16. The search returned 19 (17.1) in place of 16 (16.5), so recall is 2 of 3. On layer 0, the only nodes linked to 16 are 14, 6, 7 and 23. The search reached 6 but dropped it because it sat outside the circle, and it never expanded 14. So it never computed 16’s distance.',
+      rule:'<code>ef_search</code> has to be at least k. Setting it equal to k leaves no slack: one node just outside the circle can hide a true neighbor behind it.',
+      view:0, links:[0], stack:[0], q:true, circle:17.1,
+      arrows:[[19,14,'past'],[19,3,'past'],[19,9,'past'],[3,18,'past'],[3,10,'past'],[10,8,'past'],[8,6,'past']],
+      touched:[13,6,14,9,18,3], result:[10,8,19], miss:[16],
+      state:{head:'Exact vs returned', kv:[['recall@3','2 of 3','bad']],
+        lists:[{t:'Exact top 3', items:[[10,11.4,'good'],[8,14.1,'good'],[16,16.5,'bad','missed']]},{t:'Returned', items:[[10,11.4,'good'],[8,14.1,'good'],[19,17.1,'bad','4th nearest']]}]}
+    },
+    {
+      title:'Widen the beam: ef_search = 6',
+      text:'With room for 6, W is not full when 6 turns up at 20.8, so it is admitted and later expanded. Its neighbor 16 comes in at 16.5. The top 3 of W are now 10, 8 and 16, so recall is 3 of 3, at a cost of 14 distance computations instead of 9.',
+      rule:'<code>ef_search</code> is the query-time dial. A wider beam visits more nodes and misses fewer neighbors. In practice k is often 10, and pgvector defaults <code>ef_search</code> to 40.',
+      view:0, links:[0], stack:[0], q:true, circle:23.3,
+      arrows:[[19,14,'past'],[19,3,'past'],[19,9,'past'],[3,18,'past'],[3,10,'past'],[10,8,'past'],[8,6,'past'],[6,16,'look'],[6,12,'look'],[6,22,'look'],[16,7,'look'],[16,23,'look']],
+      touched:[13,14,9,18,12,22,7,23], result:[10,8,16,19,6,3],
+      state:{head:'Layer 0 · ef_search = 6', kv:[['distances computed','14 of 24','ink'],['recall@3','3 of 3','good']],
+        lists:[{t:'W · top 3 returned', items:[[10,11.4,'good'],[8,14.1,'good'],[16,16.5,'good'],[19,17.1,'muted'],[6,20.8,'muted'],[3,23.3,'muted']]}]}
+    },
+    {
+      title:'Filter during the search',
+      text:'Now add <code>WHERE in_stock</code>, true for 7 of the 24 rows (2, 3, 5, 7, 12, 15 and 20). Filtering after the ef = 3 search leaves nothing, because 10, 8 and 19 are all out of stock. Filtering during the search keeps walking through failing nodes but only admits matching ones into W. It returns 3, 12 and 7, the true top 3 among in-stock rows, after computing 17 of 24 distances.',
+      rule:'The predicate is checked on every node the search touches, not just the k it returns. So checking it has to be cheap, which is what an included column in the vector index provides. With a very selective filter the walk approaches a full scan, and a pre-filtered exact search wins.',
+      view:0, links:[0], stack:[0], q:true, circle:40.8, fail:true,
+      touched:[13,19,14,6,9,18,10,8,16,22,23,1,15,2], result:[3,12,7],
+      state:{head:'ef = 3 · WHERE in_stock', kv:[['filter after search','0 rows','bad'],['filter during search','3 rows','good'],['distances computed','17 of 24','ink']],
+        lists:[{t:'W · returned', items:[[3,23.3,'good'],[12,40.3,'good'],[7,40.8,'good']]}]}
+    },
+    {
+      title:'Insert a vector: search for its neighbors',
+      text:'A new row, 24, arrives at (26, 70) and draws level 0, as two thirds of draws do. Insertion runs the same search with the new vector as the query. It goes greedily through layer 2 (13 to 19), finds nothing better on layer 1, then runs a beam on layer 0 with <code>ef_construction</code> = 8. The 8 nearest nodes it finds are highlighted.',
+      rule:'<code>ef_construction</code> is the build-time counterpart of <code>ef_search</code>. A wider beam at insert time finds better neighbors and improves recall later, at the cost of a slower build.',
+      view:0, links:[0], stack:[0], q:false, newNode:1,
+      arrows:[[13,19,'hop']], touched:[3,19,18,9,14,10,16,21],
+      state:{head:'Insert 24 · ef_construction = 8', kv:[['level drawn','0','ink']],
+        lists:[{t:'Nearest found', items:[[3,11.1,'warn'],[19,12.1,'warn'],[18,17.0,'warn'],[9,22.2,'warn'],[14,26.2,'warn'],[10,27.9,'warn'],[16,31.1,'warn'],[21,37.0,'warn']]}]}
+    },
+    {
+      title:'Keep diverse neighbors, then link back',
+      text:'Candidates are considered nearest first. 3 (11.1) and 19 (12.1) are kept. 18 (17.0) is skipped because it is closer to 3 (14.1) than to the new vector, so the link to 3 already leads toward it. 9 (22.2) is kept, which reaches M = 3. Then 3, 19 and 9 each add a link back to 24. None of them exceeds M0 = 6, so nothing is pruned.',
+      rule:'This heuristic, rather than simply taking the M nearest, keeps links pointing in different directions, and that keeps separate clusters connected. When a back-link pushes a node over its cap, the same heuristic re-selects that node’s list.',
+      view:0, links:[0], stack:[0], q:false, newNode:1,
+      arrows:[[24,3,'new'],[24,19,'new'],[24,9,'new'],[24,18,'skip']], touched:[18], result:[3,19,9],
+      state:{head:'Select M = 3 for node 24', kv:[['back-links added','3','ink'],['pruned','none','ink']],
+        lists:[{t:'Candidates, nearest first', items:[[3,11.1,'good','keep'],[19,12.1,'good','keep'],[18,17.0,'bad','skip · 14.1 to 3'],[9,22.2,'good','keep']]}]}
+    },
+    {
+      title:'What you tune, and what it costs',
+      text:'Three settings cover most of it. <code>M</code> sets links per node, so it drives both memory and recall. <code>ef_construction</code> sets build quality. <code>ef_search</code> trades recall against latency on every query. Each hop jumps to an unrelated node, which means a random memory access. That is why HNSW wants the graph and the vectors in RAM.',
+      rule:'Deletes are the awkward part. Removing a node can cut paths that run through it, so implementations mark it deleted, keep routing through it, and repair or rebuild later.',
+      view:0, links:[0], stack:[0], q:false, newNode:2,
+      state:{head:'Per vector · d = 768, M = 16', kv:[['vector, float32','3,072 B','ink'],['layer-0 links, 2M × 4 B','128 B','ink'],['upper layers, average','≈ 4 B','ink']]}
+    }
+  ];
+
+  const plane = document.getElementById('layer-plane');
+  const side = document.getElementById('layer-side');
+
+  function el(tag, attrs, parent){
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function txt(content, attrs, parent){
+    const t = el('text', attrs, parent);
+    t.textContent = content;
+    return t;
+  }
+  const nodeCount = s => s.newNode ? 25 : 24;
+  const outerR = id => 8 + 4*LVL[id];
+
+  function edges(layer, s){
+    const seen = new Set(), out = [];
+    const add = (a, b) => {
+      if ((a === 24 || b === 24) && s.newNode !== 2) return;
+      const k = a < b ? a + '-' + b : b + '-' + a;
+      if (!seen.has(k)){ seen.add(k); out.push([a, b]); }
+    };
+    if (layer === 0) NB[0].forEach((list, a) => list.forEach(b => add(a, b)));
+    else Object.entries(NB[layer]).forEach(([a, list]) => list.forEach(b => add(+a, b)));
+    return out;
+  }
+
+  function star(cx, cy, r){
+    let d = '';
+    for (let i = 0; i < 10; i++){
+      const a = -Math.PI/2 + i*Math.PI/5, rr = i % 2 ? r*0.45 : r;
+      d += (i ? 'L' : 'M') + (cx + rr*Math.cos(a)).toFixed(1) + ' ' + (cy + rr*Math.sin(a)).toFixed(1) + ' ';
+    }
+    return d + 'Z';
+  }
+
+  function drawPlane(s){
+    plane.textContent = '';
+    el('rect', {x:6, y:6, width:460, height:460, rx:10, class:'plane'}, plane);
+    const g = el('g', {'clip-path':'url(#planeclip)'}, plane);
+
+    // links
+    const LC = ['link0','link1','link2'];
+    s.links.forEach(layer => edges(layer, s).forEach(([a, b]) => {
+      const A = px(P[a]), B = px(P[b]);
+      el('line', {x1:A.x, y1:A.y, x2:B.x, y2:B.y, class:LC[layer]}, g);
+    }));
+
+    // result circle
+    const qp = px(Q);
+    if (s.circle){
+      const r = s.circle*S;
+      el('circle', {cx:qp.x, cy:qp.y, r, class:'wcircle fade'}, g);
+    }
+
+    // arrows
+    (s.arrows || []).forEach(([a, b, kind]) => {
+      const A = px(P[a]), B = px(P[b]);
+      const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy);
+      const ra = (a === 24 ? 8 : outerR(a)) + 2, rb = (b === 24 ? 8 : outerR(b)) + 4;
+      const s0 = {x:A.x + dx/len*ra, y:A.y + dy/len*ra}, e0 = {x:B.x - dx/len*rb, y:B.y - dy/len*rb};
+      const mk = {hop:'ink', look:'ink', past:'muted', new:'new', skip:'bad'}[kind];
+      el('line', {x1:s0.x, y1:s0.y, x2:e0.x, y2:e0.y, class:`arr ${kind} fade`, 'marker-end':`url(#ah-${mk})`}, g);
+    });
+
+    // nodes
+    const touched = new Set(s.touched || []), result = new Set(s.result || []), miss = new Set(s.miss || []);
+    const hot = new Set([...touched, ...result, ...miss]);
+    (s.arrows || []).forEach(([a, b]) => { hot.add(a); hot.add(b); });
+    const ids = P.map((_, i) => i).filter(i => i < 24 || s.newNode);
+    ids.forEach(id => {
+      const p = px(P[id]);
+      if (LVL[id] < s.view){
+        el('circle', {cx:p.x, cy:p.y, r:3, class:'ghost'}, g);
+        return;
+      }
+      for (let k = 1; k <= LVL[id]; k++) el('circle', {cx:p.x, cy:p.y, r:8 + 4*k, class:'ring'}, g);
+      let cls = 'node';
+      const fails = s.fail && !IN_STOCK.has(id);
+      if (fails) cls += ' fail';
+      if (id === 24) cls += ' newnode';
+      if (result.has(id)) cls += ' result';
+      else if (touched.has(id)) cls += ' touched';
+      el('circle', {cx:p.x, cy:p.y, r:8, class:cls}, g);
+      if (fails) el('line', {x1:p.x - 4.5, y1:p.y + 4.5, x2:p.x + 4.5, y2:p.y - 4.5, class:'slash'}, g);
+      if (miss.has(id)) el('circle', {cx:p.x, cy:p.y, r:outerR(id) + 5, class:'missring fade'}, g);
+      const R = outerR(id) + (miss.has(id) ? 5 : 0);
+      const label = id === 24 ? '24 new' : String(id);
+      txt(label, {x:p.x + R*0.72 + 3, y:p.y - R*0.72 - 1, class:'nlabel' + (miss.has(id) ? ' bad' : (hot.has(id) || id === 24 ? ' hot' : ''))}, g);
+    });
+
+    // query
+    if (s.q){
+      el('path', {d:star(qp.x, qp.y, 10), class:'qstar'}, g);
+      txt('q', {x:qp.x + 13, y:qp.y + 5, class:'qlabel'}, g);
+    }
+  }
+
+  function drawSide(s){
+    side.textContent = '';
+    // layer stack
+    const X = 484, W = 224, fh = 30, sk = 16;
+    [2,1,0].forEach((layer, i) => {
+      const y = 8 + i*40;
+      const on = s.stack.includes(layer);
+      el('path', {d:`M${X + sk} ${y} L${X + W} ${y} L${X + W - sk} ${y + fh} L${X} ${y + fh} Z`, class:'floor' + (on ? ' on' : '')}, side);
+      txt(`Layer ${layer}`, {x:X + sk + 12, y:y + 19.5, class:'floortext' + (on ? ' on' : '')}, side);
+      const n = layer === 0 ? nodeCount(s) : (layer === 1 ? 6 : 2);
+      txt(`${n} nodes`, {x:X + W - sk - 12, y:y + 19.5, 'text-anchor':'end', class:'floortext' + (on ? ' on' : '')}, side);
+    });
+
+    // state box
+    const by = 136, bh = 330;
+    el('rect', {x:X, y:by, width:W, height:bh, rx:10, class:'box'}, side);
+    const st = s.state;
+    let y = by + 26;
+    txt(st.head, {x:X + 14, y, class:'notehead'}, side);
+    y += 24;
+    const kv = (st.kv || []).concat(s.circle ? [['worst in W (circle)', s.circle.toFixed(1), 'ink']] : []);
+    kv.forEach(([k, v, tone]) => {
+      const sub = k.startsWith('  ');
+      txt(k.trim(), {x:X + (sub ? 28 : 14), y, class:'notetext' + (sub ? ' tone-muted' : '')}, side);
+      txt(v, {x:X + W - 14, y, 'text-anchor':'end', class:`notevalue tone-${tone}`}, side);
+      y += 21;
+    });
+    (st.lists || []).forEach(list => {
+      y += 12;
+      txt(list.t, {x:X + 14, y, class:'notehead'}, side);
+      y += 20;
+      list.items.forEach(([id, d, tone, note]) => {
+        el('circle', {cx:X + 20, cy:y - 4.5, r:5, class:`idot ${tone}`}, side);
+        txt(`n${id}`, {x:X + 32, y, class:'mono tone-ink'}, side);
+        if (note) txt(note, {x:X + 64, y, class:`itemnote tone-${tone === 'good' ? 'good' : 'bad'}`}, side);
+        txt(d.toFixed(1), {x:X + W - 14, y, 'text-anchor':'end', class:'mono tone-muted'}, side);
+        y += 19;
+      });
+    });
+  }
+
+  // Controls
+  const num = document.getElementById('num');
+  const titleEl = document.getElementById('step-title');
+  const textEl = document.getElementById('step-text');
+  const ruleEl = document.getElementById('step-rule');
+  const prev = document.getElementById('prev');
+  const next = document.getElementById('next');
+  const dotsEl = document.getElementById('dots');
+  document.getElementById('total').textContent = STEPS.length;
+
+  const dots = STEPS.map((s, i) => {
+    const d = document.createElement('button');
+    d.className = 'dot';
+    d.setAttribute('aria-label', `Step ${i+1}: ${s.title}`);
+    d.addEventListener('click', () => go(i));
+    dotsEl.appendChild(d);
+    return d;
+  });
+
+  let cur = 0;
+  function go(i){
+    cur = Math.max(0, Math.min(STEPS.length - 1, i));
+    const s = STEPS[cur];
+    num.textContent = cur + 1;
+    titleEl.textContent = s.title;
+    textEl.innerHTML = s.text;
+    ruleEl.innerHTML = s.rule;
+    drawPlane(s);
+    drawSide(s);
+    prev.disabled = cur === 0;
+    next.textContent = cur === STEPS.length - 1 ? 'Start over' : 'Next';
+    dots.forEach((d, j) => j === cur ? d.setAttribute('aria-current', 'step') : d.removeAttribute('aria-current'));
+  }
+
+  prev.addEventListener('click', () => go(cur - 1));
+  next.addEventListener('click', () => go(cur === STEPS.length - 1 ? 0 : cur + 1));
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight'){ e.preventDefault(); go(cur + 1); }
+    if (e.key === 'ArrowLeft'){ e.preventDefault(); go(cur - 1); }
+  });
+
+  const start = () => go(0);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(start, start); else start();
+})();
+</script>
+
+</body></html>

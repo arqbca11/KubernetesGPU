@@ -2,14 +2,14 @@
 
 ## The question and the metric
 
-The project answers one question: when up to 50 shards compete for a few GPU workers, and each shard can also build on its own CPU, which placement policy minimizes the time until the coordinator has every shard's result?
+The project answers one question: when up to 50 shards compete for a few GPU workers, and each shard can also build on its own CPU, which placement policy minimizes the time until every shard has reported its result?
 
 Two pressures pull against each other:
 
 - **Building locally blocks the shard.** DML is blocked while the CPU builds the HNSW graph, so the shard's follow-up work (an OLTP batch, a query workload, anything on its CPU) waits. Because results are gathered from all shards, one slow shard holds up the whole cluster.
 - **Offloading to a saturated pool doesn't help.** If every GPU is busy, a new job just waits in a queue, and a local CPU build might have finished sooner.
 
-**Primary metric:** round completion time, from the start of a round until the coordinator has all shard results. Report p50 and p99 over many rounds.
+**Primary metric:** round completion time, from the start of a round until every shard has reported its result. Report p50 and p99 over many rounds.
 
 **Secondary metrics:** GPU busy fraction, queue wait, wasted work from speculative builds, and (from Phase 4) recall@10 of the built indexes.
 
@@ -27,7 +27,7 @@ Each of these is a config flag, so results can show which ones they depend on.
 
 ## Why this is a runtime coordination problem
 
-Sharded databases mostly avoid runtime coordination by planning ahead. This problem can't be planned away, which is why it needs a coordinator.
+Sharded databases mostly avoid runtime coordination by planning ahead. This problem can't be planned away, which is why it needs a scheduler.
 
 | | Sharded database queries | GPU index builds across shards |
 | --- | --- | --- |
@@ -37,10 +37,10 @@ Sharded databases mostly avoid runtime coordination by planning ahead. This prob
 
 ## System overview
 
-Shards ask the coordinator where each build should run. The coordinator either tells the shard to build locally or puts the job in a GPU queue that workers pull from. Postgres holds all shared state, so every component except the job store is stateless and can be restarted. Local builds never leave the shard; only GPU builds go through the queue and the object store.
+Shards ask the scheduler where each build should run. The scheduler either tells the shard to build locally or puts the job in a GPU queue that workers pull from. Postgres holds all shared state, so every component except the job store is stateless and can be restarted. Local builds never leave the shard; only GPU builds go through the queue and the object store.
 
 ```
- Shards x50 ──submit build──▶ Coordinator
+ Shards x50 ──submit build──▶ Scheduler
      ▲  │     ◀──build locally──  │
      │  │                         │ enqueue GPU jobs
      │  │ vectors for GPU builds  ▼
@@ -51,7 +51,7 @@ Shards ask the coordinator where each build should run. The coordinator either t
 | Component | What it does | Language | First appears |
 | --- | --- | --- | --- |
 | Shard simulator (×6, then ×50) | Creates one build and a list of follow-up jobs per round, runs local builds when told to, reports completion of each | Go | Phase 1 |
-| Coordinator | Decides CPU or GPU per build, owns the queue, grants and reaps leases, tracks rounds | Go | Phase 1 |
+| Scheduler | Decides CPU or GPU per build, owns the queue, grants and reaps leases, tracks rounds | Go | Phase 1 |
 | Job store | Postgres tables for jobs, leases and rounds; the single source of truth | SQL | Phase 1 |
 | GPU worker (×2–4) | Pulls jobs, renews its lease, runs the build, publishes the result | Python | Phase 1 (fake), 4 (hnswlib), 5 (cuVS) |
 | Object store | MinIO: vectors in, index files and manifests out | off the shelf | Phase 4 |
@@ -61,7 +61,7 @@ Shards ask the coordinator where each build should run. The coordinator either t
 ### Repo layout
 
 ```
-coordinator/     Go: API, placement policies, lease reaper
+scheduler/     Go: API, placement policies, lease reaper
 shard/           Go: shard simulator
 worker/          Python: fake, hnswlib and cuVS builders behind one interface
 db/migrations/   Postgres schema
@@ -70,11 +70,11 @@ experiments/     workload configs, runner, result CSVs, plots
 docs/            design notes and failure write-ups
 ```
 
-Keep the worker's build step behind one interface (`build(job) -> artifact`) from the first day. Phases 4 and 5 then only add implementations, and the coordinator never changes because of them.
+Keep the worker's build step behind one interface (`build(job) -> artifact`) from the first day. Phases 4 and 5 then only add implementations, and the scheduler never changes because of them.
 
-## Phase 1: Coordinator with fake jobs
+## Phase 1: Scheduler with fake jobs
 
-Build a coordinator that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. Start at 6 shards and 2 workers. **Done when** a worker killed mid-job still results in that job finishing exactly once, at both 6 and 50 shards.
+Build a scheduler that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. Start at 6 shards and 2 workers. **Done when** a worker killed mid-job still results in that job finishing exactly once, at both 6 and 50 shards.
 
 ### Fake jobs and cost model v0
 
@@ -160,17 +160,17 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 **Complete** (worker): set `state = 'done'` under the same `build_id` + `attempt` guard. A worker holding a stale attempt number can't complete a job someone else now owns.
 
-**Reap** (coordinator, every few seconds): set expired leases back to `queued`. The next claim bumps `attempt`, which fences out the old owner.
+**Reap** (scheduler, every few seconds): set expired leases back to `queued`. The next claim bumps `attempt`, which fences out the old owner.
 
 ### Steps
 
 - [ ] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
-- [ ] Coordinator API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
+- [ ] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
 - [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
-- [ ] Reaper in the coordinator
+- [ ] Reaper in the scheduler
 - [ ] Shard simulator: one binary running N shards as goroutines, each with a sequential CPU queue that applies the blocking rules from the assumptions above
 - [ ] Seeded workload generator with the scenario knobs: size distribution, follow-up profile, arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
-- [ ] Docker Compose: Postgres, coordinator, shard simulator, 2 workers. 6 shards by default.
+- [ ] Docker Compose: Postgres, scheduler, shard simulator, 2 workers. 6 shards by default.
 - [ ] Per-round timeline output: for each shard, when its build and each follow-up job started and ended
 - [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
 
@@ -178,7 +178,7 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 - [ ] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once
 - [ ] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for.
-- [ ] Restart the coordinator mid-round: the round still completes, because all state is in Postgres
+- [ ] Restart the scheduler mid-round: the round still completes, because all state is in Postgres
 - [ ] A shard resubmits the same build: the primary key makes it a no-op
 
 ## Phase 2: Kubernetes on kind
@@ -190,7 +190,7 @@ Run the same system on a local kind cluster, with Prometheus and Grafana watchin
 - [ ] kind cluster with one control-plane node and three worker nodes
 - [ ] Label and taint one node as the stand-in GPU pool. Workers get a `nodeSelector` and a toleration; nothing else can land there. This rehearses real GPU scheduling before there is a GPU.
 - [ ] Postgres as a StatefulSet with a PersistentVolumeClaim
-- [ ] Coordinator as a Deployment with one replica. Running two replicas is also safe for the reaper, because reaping is a conditional `UPDATE` and doing it twice changes nothing.
+- [ ] Scheduler as a Deployment with one replica. Running two replicas is also safe for the reaper, because reaping is a conditional `UPDATE` and doing it twice changes nothing.
 - [ ] Workers as a Deployment of long-running pullers. One Kubernetes Job per build is a different design; Phase 6 compares the two.
 - [ ] Shards as a StatefulSet, e.g. 5 pods running 10 simulated shards each. Set CPU requests and limits now, so local builds compete for real CPU in Phase 4.
 
@@ -205,13 +205,13 @@ Run the same system on a local kind cluster, with Prometheus and Grafana watchin
 
 | Metric | Type | Emitted by |
 | --- | --- | --- |
-| `round_duration_seconds` | histogram | coordinator |
-| `shard_lag_seconds` (last shard minus median shard, per round) | histogram | coordinator |
-| `build_queue_wait_seconds` | histogram | coordinator |
+| `round_duration_seconds` | histogram | scheduler |
+| `shard_lag_seconds` (last shard minus median shard, per round) | histogram | scheduler |
+| `build_queue_wait_seconds` | histogram | scheduler |
 | `build_duration_seconds{placement}` | histogram | worker, shard |
-| `placement_decisions_total{placement, policy}` | counter | coordinator |
-| `lease_expirations_total` | counter | coordinator |
-| `gpu_queue_depth` | gauge | coordinator |
+| `placement_decisions_total{placement, policy}` | counter | scheduler |
+| `lease_expirations_total` | counter | scheduler |
+| `gpu_queue_depth` | gauge | scheduler |
 | `worker_busy` | gauge | worker |
 
 Install Prometheus and Grafana with the `kube-prometheus-stack` Helm chart and scrape each service with a ServiceMonitor.
@@ -219,7 +219,7 @@ Install Prometheus and Grafana with the `kube-prometheus-stack` Helm chart and s
 ### Failure injection
 
 - [ ] Delete a worker pod mid-build
-- [ ] Delete the coordinator pod mid-round
+- [ ] Delete the scheduler pod mid-round
 - [ ] Drain the stand-in GPU node: every worker is evicted and the queue grows. This is the case the CPU-fallback policies in Phase 3 should handle.
 - [ ] Restart Postgres: services retry, and nothing completes twice
 
@@ -229,17 +229,17 @@ This phase is the core of the project: four policies behind one interface, compa
 
 ### Policy interface
 
-A policy is a pure function of the state it's given, which lets the same code run in the real coordinator and in a simulator.
+A policy is a pure function of the state it's given, which lets the same code run in the real scheduler and in a simulator.
 
 - `decide(build, shard_state, pool_state) -> (placement, priority)` when a shard submits
 - `reconsider(pool_state, all_builds) -> actions` on a timer, for moving queued jobs back to local or starting speculative copies
 
-What the coordinator needs to know:
+What the scheduler needs to know:
 
 - **From the shard:** `n_vectors`, `dim`, `mem_bytes`, its follow-up job list (durations and `needs_index` flags), and its local build estimate
 - **From the pool:** live workers and their memory capacity (from the `workers` table), the remaining time of each in-flight job, and the estimated GPU time of each queued job
 
-**GPU finish estimate:** replay the queue. Given each worker's remaining time and the jobs ahead in priority order, assign each job to the earliest-free worker, then add this job's GPU and transfer time. This is list scheduling, and it only works because the coordinator can see the whole queue.
+**GPU finish estimate:** replay the queue. Given each worker's remaining time and the jobs ahead in priority order, assign each job to the earliest-free worker, then add this job's GPU and transfer time. This is list scheduling, and it only works because the scheduler can see the whole queue.
 
 ### The four policies
 
