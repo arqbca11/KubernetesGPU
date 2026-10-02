@@ -1,0 +1,19 @@
+# Go
+bin/
+*.test
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Experiment outputs
+experiments/results/*.csv
+experiments/results/*.png
+
+# Local env
+.env
+*.local
+.DS_Store
