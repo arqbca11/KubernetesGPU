@@ -17,3 +17,4 @@ experiments/results/*.png
 .env
 *.local
 .DS_Store
+docs/motivation.md
