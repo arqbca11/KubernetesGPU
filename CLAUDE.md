@@ -57,4 +57,11 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 
 ## Commands
 
-_(none yet)_
+Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew install --cask docker`.
+`psql` lives in `/opt/homebrew/opt/libpq/bin` (added to `~/.zshrc`).
+
+| Task | Command |
+| --- | --- |
+| Check toolchain | `go version && python3.12 --version && uv --version && psql --version && docker compose version` |
+
+_(build, test and run commands are added as components land)_
