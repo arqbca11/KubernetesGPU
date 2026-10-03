@@ -6,10 +6,10 @@ The project answers one question: when up to 50 shards compete for a few GPU wor
 
 Two pressures pull against each other:
 
-- **Building locally blocks the shard.** DML is blocked while the CPU builds the HNSW graph, so the shard's follow-up work (an OLTP batch, a query workload, anything on its CPU) waits. Because results are gathered from all shards, one slow shard holds up the whole cluster.
+- **Building locally blocks the shard.** DML is blocked while the CPU builds the HNSW graph, so the queries arriving at the shard queue up behind it. Because results are gathered from all shards, one slow shard holds up the whole cluster.
 - **Offloading to a saturated pool doesn't help.** If every GPU is busy, a new job just waits in a queue, and a local CPU build might have finished sooner.
 
-**Primary metric:** round completion time, from the start of a round until every shard has reported its result. Report p50 and p99 over many rounds.
+**Primary metric:** round completion time, from the DDL until every shard has built its index and drained the queries the build held up: the cluster's recovery time. Report p50 and p99 over many rounds.
 
 **Secondary metrics:** GPU busy fraction, queue wait, wasted work from speculative builds, and (from Phase 4) recall@10 of the built indexes.
 
@@ -17,13 +17,14 @@ Two pressures pull against each other:
 
 Each of these is a config flag, so results can show which ones they depend on.
 
-1. A **round** gives every shard one index build and a list of **follow-up jobs**. The round ends when every shard has finished its build and all of its follow-up jobs.
-2. A **follow-up job** is any CPU work the shard does after submitting its build. Each has a CPU duration and a flag `needs_index`. Follow-up jobs on a shard run sequentially, in order, and never go to the GPU pool. "One OLTP job per shard" is the special case of a one-job list, and the default profile mixes jobs that need the index with jobs that don't.
-3. A **local build** occupies the shard's CPU, and no follow-up job can start until the build finishes.
-4. An **offloaded build** frees the shard's CPU. Follow-up jobs with `needs_index = false` run while the GPU builds; those with `needs_index = true` wait for the build to complete wherever it ran. The shard is done when the build and every follow-up job have finished.
-5. A **GPU worker** runs one build at a time to start with, and has a modeled memory capacity. A build whose modeled memory need exceeds every worker's capacity must build locally. Batching several small builds onto one worker comes later.
-6. **Distribution:** index sizes across shards follow a configurable distribution. Zipf (a few heavy shards, most light) is the default; uniform and bimodal are the other scenarios (see Phase 3, Scenarios).
-7. **Scale:** the default configuration is 6 shards and 2 GPU workers. 50 shards and 3 workers is the target, reached by changing config once the small setup runs.
+1. A **round** begins when every shard receives its index build (the DDL). Each shard also has a **query stream**: a seeded, finite sequence of queries arriving over time, each with a CPU duration and a `needs_index` flag. A shard is done when its build is terminal, its stream is exhausted and its backlog has drained; the round ends when every shard is done.
+2. **Nobody declares queries in advance.** The scheduler learns a shard's load only from the shard's periodic **report**: queue depth, waiting queries that need the index, oldest wait, build progress. The simulator knows the future and may give it to a clairvoyant oracle policy for comparison, never to a deployable one.
+3. A **local build** occupies the shard's CPU; the backlog grows at the arrival rate while it runs.
+4. An **offloaded build** frees the CPU. Queries that don't need the index run as they arrive; those that do wait for the build wherever it ran. The CPU runs ready queries one at a time in arrival order, skipping queries whose index isn't ready.
+5. **Placement can change in flight.** A local build can be preempted to the GPU queue (progress lost, CPU freed, priority grows with blocked work). A queued GPU build can be moved back to local. A leased build is never preempted. The shard learns of changes in the reply to its own report.
+6. A **GPU worker** runs one build at a time and has a modeled memory capacity. A build that fits no live worker must build locally. Batching several small builds onto one worker comes later.
+7. **Distribution:** index sizes follow a configurable distribution; Zipf is the default. Query stream profiles (rate, duration, `needs_index` fraction, horizon) are a second scenario dimension.
+8. **Scale:** the default configuration is 6 shards and 2 GPU workers. 50 shards and 3 workers is the target, reached by changing config once the small setup runs.
 
 ## Why this is a runtime coordination problem
 
@@ -50,7 +51,7 @@ Shards ask the scheduler where each build should run. The scheduler either tells
 
 | Component | What it does | Language | First appears |
 | --- | --- | --- | --- |
-| Shard simulator (×6, then ×50) | Creates one build and a list of follow-up jobs per round, runs local builds when told to, reports completion of each | Go | Phase 1 |
+| Shard simulator (×6, then ×50) | Per round: submits its build, generates its query stream, runs local builds and queries on its CPU, reports its load, obeys placement changes | Go | Phase 1 |
 | Scheduler | Decides CPU or GPU per build, owns the queue, grants and reaps leases, tracks rounds | Go | Phase 1 |
 | Job store | Postgres tables for jobs, leases and rounds; the single source of truth | SQL | Phase 1 |
 | GPU worker (×2–4) | Pulls jobs, renews its lease, runs the build, publishes the result | Python | Phase 1 (fake), 4 (hnswlib), 5 (cuVS) |
@@ -87,14 +88,14 @@ A job carries `n_vectors` and `dim`. The worker sleeps for the modeled GPU time 
 
 ### Schema
 
-Four tables. `builds` is the queue and the lease; `shard_jobs` records follow-up jobs so round completion and the timeline come from Postgres alone; `workers` is membership and health; `rounds` is bookkeeping.
+Five tables. `builds` is the queue and the lease; `shard_jobs` records each query as it arrives and runs, so round completion and the timeline come from Postgres alone; `shard_status` holds each shard's latest load report; `workers` is membership and health; `rounds` is bookkeeping. The migrations in `db/migrations/` are authoritative; this is the shape.
 
 ```sql
 CREATE TABLE rounds (
-  round_id     bigint PRIMARY KEY,
+  round_id     bigserial PRIMARY KEY,
   scenario     text NOT NULL,
   seed         bigint NOT NULL,
-  n_shards     int NOT NULL,            -- how many shards must report before the round is complete
+  n_shards     int NOT NULL,            -- how many shards must report done before the round is complete
   started_at   timestamptz NOT NULL DEFAULT now(),
   finished_at  timestamptz
 );
@@ -106,7 +107,7 @@ CREATE TABLE builds (
   n_vectors    bigint NOT NULL,
   dim          int NOT NULL,
   mem_bytes    bigint NOT NULL,         -- modeled GPU memory need
-  placement    text NOT NULL,           -- 'local' or 'gpu'
+  placement    text NOT NULL,           -- 'local' or 'gpu'; may change while queued or running
   state        text NOT NULL,           -- gpu: queued, leased, done, failed; local: running, done, failed
   priority     double precision NOT NULL DEFAULT 0,
   attempt      int NOT NULL DEFAULT 0,  -- fencing token, +1 on every claim
@@ -114,21 +115,34 @@ CREATE TABLE builds (
   lease_until  timestamptz,
   fail_reason  text,
   enqueued_at  timestamptz NOT NULL DEFAULT now(),
-  started_at   timestamptz,
+  started_at   timestamptz,             -- start of the current attempt
   finished_at  timestamptz
 );
 CREATE INDEX builds_queue ON builds (priority DESC, enqueued_at)
   WHERE state = 'queued' AND placement = 'gpu';
 
-CREATE TABLE shard_jobs (
+CREATE TABLE shard_jobs (                -- one row per query, written on arrival
   round_id     bigint NOT NULL REFERENCES rounds,
   shard_id     int NOT NULL,
-  seq          int NOT NULL,            -- order within the shard's queue
+  seq          int NOT NULL,            -- arrival order within the shard
   duration_ms  bigint NOT NULL,         -- modeled CPU time
   needs_index  boolean NOT NULL,
+  arrived_at   timestamptz NOT NULL DEFAULT now(),
   started_at   timestamptz,
   finished_at  timestamptz,
   PRIMARY KEY (round_id, shard_id, seq)
+);
+
+CREATE TABLE shard_status (              -- the shard's latest report; the scheduler's only view of its load
+  round_id             bigint NOT NULL REFERENCES rounds,
+  shard_id             int NOT NULL,
+  queue_depth          int NOT NULL,     -- queries waiting (any kind)
+  waiting_needs_index  int NOT NULL,     -- of those, how many need the new index
+  oldest_wait_ms       bigint NOT NULL,  -- how long the oldest waiting query has waited
+  build_progress       real NOT NULL,    -- 0..1 for a local build in progress, else 0
+  stream_done          boolean NOT NULL, -- the shard's query stream is exhausted
+  updated_at           timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (round_id, shard_id)
 );
 
 CREATE TABLE workers (
@@ -139,7 +153,7 @@ CREATE TABLE workers (
 );
 ```
 
-Local builds also get a `builds` row (`placement = 'local'`, state `running` then `done`), so every build in a round is visible in one place. The migration in `db/migrations/` is the authoritative version of this schema and adds `CHECK` constraints.
+Local builds also get a `builds` row (`placement = 'local'`, state `running` then `done`), so every build in a round is visible in one place. A round is complete when `n_shards` shards have `stream_done`, every one of their queries has finished, and every build is terminal.
 
 ### The four operations
 
@@ -167,13 +181,13 @@ RETURNING build_id, attempt, n_vectors, dim;
 ### Steps
 
 - [x] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
-- [x] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
+- [x] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), record query arrivals and completions, accept shard load reports and answer with the build's current placement, read round status
 - [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
 - [x] Reaper in the scheduler
-- [ ] Shard simulator: one binary running N shards as goroutines, each with a sequential CPU queue that applies the blocking rules from the assumptions above
-- [ ] Seeded workload generator with the scenario knobs: size distribution, follow-up profile, arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
+- [ ] Shard simulator: one binary running N shards as goroutines. Each shard submits its build, generates its query stream, runs the local build and ready queries on its single CPU under the rules above, reports its load every poll interval, and obeys placement changes in the reply (abort a preempted local build; start a build moved to local)
+- [ ] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
 - [ ] Docker Compose: Postgres, scheduler, shard simulator, 2 workers. 6 shards by default.
-- [ ] Per-round timeline output: for each shard, when its build and each follow-up job started and ended
+- [ ] Per-round timeline output: for each shard, the build (with any placement change) and each query's arrival, start and end
 - [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
 
 ### Failure tests
@@ -233,27 +247,30 @@ This phase is the core of the project: four policies behind one interface, compa
 
 A policy is a pure function of the state it's given, which lets the same code run in the real scheduler and in a simulator.
 
-- `decide(build, shard_state, pool_state) -> (placement, priority)` when a shard submits
-- `reconsider(pool_state, all_builds) -> actions` on a timer, for moving queued jobs back to local or starting speculative copies
+- `decide(build, shard_status, pool_state) -> (placement, priority)` when a shard submits
+- `reconsider(pool_state, all_builds, all_shard_status) -> actions` on a timer: preempt a local build to the GPU queue, move a queued GPU build back to local, start a speculative copy, change a priority
 
-What the scheduler needs to know:
+What a deployable policy may know:
 
-- **From the shard:** `n_vectors`, `dim`, `mem_bytes`, its follow-up job list (durations and `needs_index` flags), and its local build estimate
-- **From the pool:** live workers and their memory capacity (from the `workers` table), the remaining time of each in-flight job, and the estimated GPU time of each queued job
+- **From the shard at submit:** `n_vectors`, `dim`, `mem_bytes`, and its current load report. Not its future queries.
+- **From the shard while building:** its periodic report: queue depth, waiting queries that need the index, oldest wait, build progress. This is the signal that a local build is hurting.
+- **From the pool:** live workers and their memory capacity, the remaining time of each in-flight build, and the estimated GPU time of each queued build
+
+What only the **clairvoyant oracle** may know: each shard's full future query stream. It exists to measure how much the unknowable future costs the deployable policies.
 
 **GPU finish estimate:** replay the queue. Given each worker's remaining time and the jobs ahead in priority order, assign each job to the earliest-free worker, then add this job's GPU and transfer time. This is list scheduling, and it only works because the scheduler can see the whole queue.
 
-### The four policies
+### The policies
 
-1. **Always GPU.** Every build goes to the queue, first come first served. This is the baseline.
-2. **Static threshold.** Builds with `n_vectors` ≥ T go to the GPU queue, the rest build locally. Sweep T. This is the OpenSearch-style approach.
-3. **Cost-based with critical-path priority.**
-    - Local finish = CPU build, then every follow-up job in order.
-    - GPU finish = simulate the shard's follow-up queue: jobs with `needs_index = false` run from now; the first job with `needs_index = true` waits for the GPU finish estimate; everything after it runs in order.
-    - Choose whichever finishes sooner.
-    - Queue priority = the shard's finish time if it built locally, largest first, so the shards that would be the worst stragglers get GPUs first. This is the longest-processing-time-first rule for minimizing makespan.
-    - On each `reconsider`, move any queued job whose GPU estimate now exceeds its local finish back to local.
-4. **Cost-based plus speculation.** When a worker is idle and the queue is empty, take the local build with the latest projected finish. If a GPU copy would finish sooner than the remaining local work, start one. The first to finish wins and the other is cancelled. Record the wasted work.
+1. **Always GPU.** Every build goes to the queue, first come first served. The baseline.
+2. **Static threshold.** Builds with `n_vectors` ≥ T go to the GPU queue, the rest build locally. Sweep T. The OpenSearch-style approach.
+3. **Reactive migration.** The core policy. At submit it knows only the build size, the pool, and the shard's current load, so it places like a threshold policy (or always local). Then, on every `reconsider`, for each shard building locally it compares two futures from the shard's report:
+    - **Stay local:** remaining local time (from `build_progress`) plus draining the backlog afterwards.
+    - **Migrate:** kill the local build and queue it on the GPU. Queries that don't need the index start draining the moment the CPU is freed; those that do wait for GPU queue wait plus GPU build plus transfer. Priority in the GPU queue grows with the blocked work behind the build, so the shard that is hurting most is served first.
+    - If migrating recovers sooner, preempt. Sunk cost is in the comparison through `build_progress`: a build at ninety percent is rarely worth killing.
+    - Also move a queued GPU build back to local when its GPU estimate has grown past its local estimate (reneging).
+4. **Reactive migration plus speculation.** When a worker is idle and the queue is empty, take the local build whose shard reports the worst backlog. Start a GPU copy without killing the local build: the first to finish wins and the other is cancelled. Never loses CPU progress; burns a GPU. Record the wasted work.
+5. **Clairvoyant cost-based.** The oracle. Knows every shard's future stream, so it computes exact local and GPU finish times at submit, chooses the sooner, and sets priority to the shard's would-be local finish (longest-processing-time-first). Not deployable; the gap between it and policy 3 or 4 is how much the unknowable future costs.
 
 ### Simulator
 
@@ -261,14 +278,14 @@ Fake jobs sleep in real time, so a 200-round sweep on the live system would take
 
 ### Scenarios
 
-A workload is a seeded combination of four knobs: size distribution, follow-up profile, arrival pattern, and pool configuration. Each named scenario is chosen to stress one GPU resource management case. Every policy runs on every scenario.
+A workload is a seeded combination of four knobs: size distribution, query stream profile, DDL arrival pattern, and pool configuration. Each named scenario is chosen to stress one GPU resource management case. Every policy runs on every scenario.
 
 | Scenario | Shape | GPU management case it exercises |
 | --- | --- | --- |
-| Uniform | Equal sizes, light follow-ups, all at once | Pure queueing. Does CPU fallback relieve an undersized pool? |
-| Skewed (default) | Zipf sizes, mixed follow-ups, all at once | Critical-path priority. Longest-build-first should beat FCFS. |
+| Uniform | Equal sizes, light query load, all at once | Pure queueing. Does CPU fallback relieve an undersized pool? |
+| Skewed (default) | Zipf sizes, moderate query load with a mixed needs_index fraction, all at once | Critical-path priority. Longest-build-first should beat FCFS. |
 | Bimodal | A few huge builds, many tiny; some huge builds exceed one worker's memory | Memory bin-packing, and stragglers set by the huge builds. |
-| Downstream-heavy | Medium builds; one shard has heavy follow-up work that needs the index | The critical path is set by work after the build, not by build size. |
+| Downstream-heavy | Medium builds; one shard has a much higher query rate, mostly needing the index | The critical path is set by the queries behind the build, not by build size. Reactive migration should notice from the report alone. |
 | Staggered | Shards submit at different times within the round | Speculation and reneging. GPUs sit idle while CPU builds are mid-flight. |
 | Shrinking pool | A worker dies or is drained mid-round | Reneging queued jobs back to local. |
 
@@ -279,14 +296,15 @@ A workload is a seeded combination of four knobs: size distribution, follow-up p
 | GPU workers | 1, 2, 4 | Where GPUs stop being the bottleneck |
 | Size skew (Zipf exponent) | 0.5, 1.0, 1.5 | How much critical-path priority matters |
 | Estimate error (log-normal σ on every estimate) | 0, 0.3, 0.6 | How fragile the cost model is, and whether speculation covers for it |
-| Follow-up work relative to build work | 0.5×, 1×, 2× | When blocking the shard costs the most |
+| Query load relative to build work (arrival rate × duration) | 0.5×, 1×, 2× | When blocking the shard costs the most |
+| `needs_index` fraction | 0, 0.5, 1 | When freeing the CPU early helps, and when only a finished index does |
 | Shard count | 6, 50 | Whether conclusions from the small setup hold at scale |
 
 ### Steps
 
-- [ ] Policy interface and the four implementations
+- [ ] Policy interface and the five implementations (clairvoyant runs only in the simulator)
 - [ ] GPU finish estimator (queue replay)
-- [ ] Reneging and speculation in `reconsider`, including cancelling the losing copy
+- [ ] Preemption, reneging and speculation in `reconsider`, including cancelling the losing copy
 - [ ] Discrete-event simulator using the same policy code
 - [ ] Seeded runner writing one CSV row per round
 - [ ] Plots: p50 and p99 round time per policy; p99 against estimate error per policy
@@ -314,7 +332,7 @@ Workers are still CPU-only here, so give them more cores than a shard gets (e.g.
 - [ ] Store artifacts under `build_id/attempt/`, so a stale attempt can never overwrite the winning one
 - [ ] Publish order: upload the index, then write the manifest (build ID, attempt, checksum, parameters, recall), then mark the job complete under the fencing guard
 - [ ] Recall gate: run held-out queries and compare recall@10 with ground truth. Below the threshold, mark the build failed with a reason.
-- [ ] Keep follow-up jobs simulated, but as a CPU-burning loop instead of a sleep, so they compete with local builds for real
+- [ ] Keep queries simulated, but as a CPU-burning loop instead of a sleep, so they compete with local builds for real
 
 ### Calibration
 
@@ -359,7 +377,7 @@ Add a real GPU build path, run it on a small cloud GPU node pool for a few hours
 
 ## Phase 6 (optional): Kubernetes-native dispatch
 
-Rebuild the dispatch side with a custom resource, an operator and Kueue, then write down what each hand-built piece became. The placement policy stays on top: Kueue handles admission, quota and priority, but it has no idea what follow-up work is waiting on a shard, so it can't make the CPU-versus-GPU decision.
+Rebuild the dispatch side with a custom resource, an operator and Kueue, then write down what each hand-built piece became. The placement policy stays on top: Kueue handles admission, quota and priority, but it has no idea what queries are waiting on a shard, so it can't make the CPU-versus-GPU decision.
 
 | Hand-built (Phases 1–5) | Kubernetes-native | Note |
 | --- | --- | --- |

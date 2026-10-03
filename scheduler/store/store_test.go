@@ -32,7 +32,7 @@ func newStore(t *testing.T) (*Store, *pgxpool.Pool) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE shard_jobs, builds, rounds, workers`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE shard_status, shard_jobs, builds, rounds, workers`); err != nil {
 		t.Fatal(err)
 	}
 	return New(pool), pool
@@ -44,7 +44,7 @@ func submit(t *testing.T, s *Store, round int64, shard int32, placement string, 
 	ins, err := s.SubmitBuild(context.Background(), Build{
 		BuildID: id, RoundID: round, ShardID: shard, NVectors: 1000, Dim: 128,
 		MemBytes: mem, Placement: placement, Priority: priority,
-	}, nil)
+	})
 	if err != nil || !ins {
 		t.Fatalf("submit %s: inserted=%v err=%v", id, ins, err)
 	}
@@ -146,7 +146,7 @@ func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 	const n = 20
 	for i := range int32(n) {
 		if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(i, r), RoundID: r, ShardID: i,
-			NVectors: 1000, Dim: 128, MemBytes: 1 << 20, Placement: "gpu"}, nil); err != nil {
+			NVectors: 1000, Dim: 128, MemBytes: 1 << 20, Placement: "gpu"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -338,7 +338,7 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 	ctx := context.Background()
 	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	b := Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu", Priority: 7}
-	if ins, err := s.SubmitBuild(ctx, b, nil); err != nil || !ins {
+	if ins, err := s.SubmitBuild(ctx, b); err != nil || !ins {
 		t.Fatalf("first submit: %v %v", ins, err)
 	}
 	t.Logf("submitted %s as gpu, priority 7", b.BuildID)
@@ -348,7 +348,7 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 
 	b.Priority = 99
 	b.Placement = "local"
-	ins, err := s.SubmitBuild(ctx, b, nil)
+	ins, err := s.SubmitBuild(ctx, b)
 	if err != nil || ins {
 		t.Fatalf("second submit: inserted=%v err=%v", ins, err)
 	}
@@ -431,12 +431,18 @@ func TestRoundFinishesOnlyWhenEveryShardIsDone(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
 	r, _ := s.CreateRound(ctx, "test", 1, 2)
-	t.Log("round expects 2 shards")
-	jobs := []JobSpec{{Seq: 0, DurationMs: 100, NeedsIndex: false}, {Seq: 1, DurationMs: 100, NeedsIndex: true}}
-	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu"}, jobs); err != nil {
+	t.Log("round expects 2 shards (decision 30: done = all builds terminal, all shards stream_done, all queries finished)")
+	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu"}); err != nil {
 		t.Fatal(err)
 	}
-	t.Log("shard 1 submits a gpu build with 2 follow-up jobs")
+	t.Log("shard 1 submits a gpu build; two queries arrive at it over time")
+	s.RecordArrival(ctx, r, 1, 0, 100, false) //nolint:errcheck
+	s.RecordArrival(ctx, r, 1, 1, 100, true)  //nolint:errcheck
+	report := func(shard int32, depth int32, done bool) {
+		if err := s.ReportStatus(ctx, ShardStatus{RoundID: r, ShardID: shard, QueueDepth: depth, StreamDone: done}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	finish := func(label string) int64 {
 		n, err := s.FinishCompleteRounds(ctx)
@@ -448,7 +454,7 @@ func TestRoundFinishesOnlyWhenEveryShardIsDone(t *testing.T) {
 		if rd.FinishedAt != nil {
 			done = "finished"
 		}
-		t.Logf("%-55s -> rounds stamped: %d, round is %s", label, n, done)
+		t.Logf("%-62s -> rounds stamped: %d, round is %s", label, n, done)
 		return n
 	}
 	finish("nothing done yet")
@@ -458,38 +464,90 @@ func TestRoundFinishesOnlyWhenEveryShardIsDone(t *testing.T) {
 	s.FinishJob(ctx, r, 1, 0)             //nolint:errcheck
 	s.StartJob(ctx, r, 1, 1)              //nolint:errcheck
 	s.FinishJob(ctx, r, 1, 1)             //nolint:errcheck
-	if n := finish("shard 1 build done and both jobs finished, shard 2 absent"); n != 0 {
+	report(1, 0, true)
+	if n := finish("shard 1 build done, queries finished, stream_done; shard 2 absent"); n != 0 {
 		t.Fatal("round finished before shard 2 even submitted")
 	}
-	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(2, r), RoundID: r, ShardID: 2, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "local"}, jobs[:1]); err != nil {
+	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(2, r), RoundID: r, ShardID: 2, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "local"}); err != nil {
 		t.Fatal(err)
 	}
-	if n := finish("shard 2 submits a local build with 1 job, still running"); n != 0 {
+	s.RecordArrival(ctx, r, 2, 0, 100, false) //nolint:errcheck
+	report(2, 1, false)
+	if n := finish("shard 2 submits a local build, one query waiting, stream not done"); n != 0 {
 		t.Fatal("round finished with a running build")
 	}
 	s.CompleteLocal(ctx, BuildID(2, r)) //nolint:errcheck
 	s.StartJob(ctx, r, 2, 0)            //nolint:errcheck
-	if n := finish("shard 2 build done, its job started but not finished"); n != 0 {
-		t.Fatal("round finished with an unfinished job")
+	s.FinishJob(ctx, r, 2, 0)           //nolint:errcheck
+	report(2, 0, false)
+	if n := finish("shard 2 build done, query finished, but stream NOT reported done"); n != 0 {
+		t.Fatal("round finished before shard 2 said its stream was exhausted")
 	}
-	s.FinishJob(ctx, r, 2, 0) //nolint:errcheck
-	if n := finish("shard 2 job finished"); n != 1 {
+	report(2, 0, true)
+	if n := finish("shard 2 reports stream_done with an empty queue"); n != 1 {
 		t.Fatal("round did not finish")
 	}
 	if n := finish("run again"); n != 0 {
 		t.Fatal("finish is not idempotent")
 	}
-	// finished_at is the last build/job finish, not the time of the check.
 	var ok bool
 	pool.QueryRow(ctx, `
 		SELECT r.finished_at = (SELECT MAX(finished_at) FROM shard_jobs WHERE round_id = r.round_id)
 		FROM rounds r WHERE round_id = $1`, r).Scan(&ok) //nolint:errcheck
 	if !ok {
-		t.Fatal("round finished_at is not the last job's finished_at")
+		t.Fatal("round finished_at is not the last query's finished_at")
 	}
-	t.Log("round finished_at equals the last job's finished_at, not the reaper tick")
-	// A job cannot finish before it starts.
+	t.Log("round finished_at equals the last query's finished_at, not the time of the stream_done report")
 	if ok, _ := s.FinishJob(ctx, r, 1, 1); ok {
 		t.Fatal("finished an already-finished job")
 	}
+}
+
+func TestPreemptAndRenegeTransitions(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
+	id := submit(t, s, r, 1, "local", 0, 1<<20)
+	row(t, pool, id)
+
+	t.Log("decision 31: preempt a running local build to the gpu queue")
+	if ok, _ := s.PreemptToGPU(ctx, id, 42); !ok {
+		t.Fatal("preempt rejected")
+	}
+	row(t, pool, id)
+	var prio float64
+	pool.QueryRow(ctx, `SELECT priority FROM builds WHERE build_id = $1`, id).Scan(&prio) //nolint:errcheck
+	if st, a := state(t, pool, id); st != "queued" || a != 0 || prio != 42 {
+		t.Fatalf("after preempt: state=%s attempt=%d priority=%v", st, a, prio)
+	}
+	if ok, _ := s.PreemptToGPU(ctx, id, 1); ok {
+		t.Fatal("preempted a build that is no longer a running local build")
+	}
+	t.Log("preempting again -> rejected (not running/local any more)")
+	if ok, _ := s.CompleteLocal(ctx, id); ok {
+		t.Fatal("the shard completed a build that was taken away from it")
+	}
+	t.Log("the shard, unaware, reports its local build done -> rejected: that is how it learns")
+
+	t.Log("renege the queued gpu build back to local")
+	if ok, _ := s.RenegeToLocal(ctx, id); !ok {
+		t.Fatal("renege rejected")
+	}
+	row(t, pool, id)
+	if _, ok, _ := s.Claim(ctx, "w", 1<<40, lease); ok {
+		t.Fatal("a worker claimed a build that was moved back to local")
+	}
+	t.Log("a worker tries to claim -> nothing; the build is local again")
+
+	t.Log("a leased build is never moved")
+	s.PreemptToGPU(ctx, id, 99) //nolint:errcheck
+	c, ok, _ := s.Claim(ctx, "w", 1<<40, lease)
+	if !ok || c.Attempt != 1 {
+		t.Fatalf("claim after preempt: ok=%v attempt=%d", ok, c.Attempt)
+	}
+	row(t, pool, id)
+	if ok, _ := s.RenegeToLocal(ctx, id); ok {
+		t.Fatal("reneged a leased build")
+	}
+	t.Logf("renege on a leased build -> rejected; attempt is %d, bumped by the claim, untouched by the moves", c.Attempt)
 }

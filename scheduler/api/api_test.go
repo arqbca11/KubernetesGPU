@@ -47,7 +47,7 @@ func newHarness(t *testing.T) *harness {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE shard_jobs, builds, rounds, workers`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE shard_status, shard_jobs, builds, rounds, workers`); err != nil {
 		t.Fatal(err)
 	}
 	st := store.New(pool)
@@ -108,11 +108,17 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 		t.Fatalf("create round: %d", code)
 	}
 	r := cr.RoundID
+	report := func(shard int32, req ReportRequest) ReportResponse {
+		var rr ReportResponse
+		if code := h.call("POST", fmt.Sprintf("/shards/%d/%d/report", r, shard), req, &rr); code != 200 {
+			t.Fatalf("report: %d", code)
+		}
+		return rr
+	}
 
-	t.Log("--- shard 1 submits a 100k x 128 build with two follow-up jobs")
+	t.Log("--- shard 1 submits a 100k x 128 build; it knows nothing about future queries")
 	var b1 SubmitBuildResponse
-	code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 1, NVectors: 100_000, Dim: 128,
-		Jobs: []JobRequest{{DurationMs: 50, NeedsIndex: false}, {DurationMs: 50, NeedsIndex: true}}}, &b1)
+	code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 1, NVectors: 100_000, Dim: 128}, &b1)
 	if code != 201 || b1.Placement != "gpu" || !b1.Created {
 		t.Fatalf("submit 1: code=%d resp=%+v", code, b1)
 	}
@@ -124,25 +130,31 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 	if code != 200 || dup.Created || dup.Placement != "gpu" || dup.BuildID != b1.BuildID {
 		t.Fatalf("duplicate submit: code=%d resp=%+v", code, dup)
 	}
-	t.Log("    200 with created=false and the original decision: nothing changed")
 
 	t.Log("--- shard 2 submits a 20M x 128 build: 19 GiB modeled memory, more than any live worker")
 	var b2 SubmitBuildResponse
-	code = h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 2, NVectors: 20_000_000, Dim: 128,
-		Jobs: []JobRequest{{DurationMs: 50, NeedsIndex: true}}}, &b2)
+	code = h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 2, NVectors: 20_000_000, Dim: 128}, &b2)
 	if code != 201 || b2.Placement != "local" {
 		t.Fatalf("submit 2: code=%d resp=%+v", code, b2)
 	}
 	t.Logf("    placed local: %s", b2.Reason)
 
-	t.Log("--- the round is open: shard 1 waits on the gpu, shard 2 is building locally")
-	var rs RoundStatus
-	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
-	if rs.Round.FinishedAt != nil || len(rs.Builds) != 2 || len(rs.Jobs) != 3 {
-		t.Fatalf("round status: finished=%v builds=%d jobs=%d", rs.Round.FinishedAt, len(rs.Builds), len(rs.Jobs))
+	t.Log("--- queries arrive at shard 1 while its build is queued on the gpu")
+	if code := h.call("POST", fmt.Sprintf("/jobs/%d/1", r), ArrivalRequest{Seq: 0, DurationMs: 50, NeedsIndex: false}, nil); code != 201 {
+		t.Fatalf("arrival: %d", code)
+	}
+	if code := h.call("POST", fmt.Sprintf("/jobs/%d/1", r), ArrivalRequest{Seq: 0, DurationMs: 50, NeedsIndex: false}, nil); code != 200 {
+		t.Fatalf("repeat arrival should be 200, got %d", code)
+	}
+	h.call("POST", fmt.Sprintf("/jobs/%d/1", r), ArrivalRequest{Seq: 1, DurationMs: 50, NeedsIndex: true}, nil)
+
+	t.Log("--- shard 1 reports: 2 waiting, 1 of them needs the index; the reply tells it the build is still queued")
+	rr := report(1, ReportRequest{QueueDepth: 2, WaitingNeedsIndex: 1, OldestWaitMs: 120})
+	if rr.Build.Placement != "gpu" || rr.Build.State != "queued" {
+		t.Fatalf("report reply: %+v", rr.Build)
 	}
 
-	t.Log("--- shard 1's cpu is free, so its first job (needs_index=false) runs now")
+	t.Log("--- shard 1's cpu is free, so query 0 (needs_index=false) runs now")
 	if code := h.call("POST", fmt.Sprintf("/jobs/%d/1/0/start", r), nil, nil); code != 200 {
 		t.Fatalf("job start: %d", code)
 	}
@@ -158,17 +170,22 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 	if err != nil || !ok || c.BuildID != b1.BuildID {
 		t.Fatalf("claim: ok=%v id=%s err=%v", ok, c.BuildID, err)
 	}
-	t.Logf("    claimed %s attempt %d", c.BuildID, c.Attempt)
 	if ok, _ := h.st.Complete(ctx, c.BuildID, c.Attempt); !ok {
 		t.Fatal("complete rejected")
 	}
-	t.Log("    completed")
 
-	t.Log("--- shard 1 sees its index is ready and runs its second job (needs_index=true)")
+	t.Log("--- shard 1's next report learns the build is done; query 1 (needs_index) runs; stream exhausted")
+	rr = report(1, ReportRequest{QueueDepth: 1, WaitingNeedsIndex: 1, OldestWaitMs: 300})
+	if rr.Build.State != "done" || rr.Build.Attempt != 1 {
+		t.Fatalf("report reply after completion: %+v", rr.Build)
+	}
 	h.call("POST", fmt.Sprintf("/jobs/%d/1/1/start", r), nil, nil)
 	h.call("POST", fmt.Sprintf("/jobs/%d/1/1/done", r), nil, nil)
+	report(1, ReportRequest{QueueDepth: 0, StreamDone: true})
 
-	t.Log("--- shard 2 finishes its local build, then its job")
+	t.Log("--- shard 2: one query arrives during its local build, then the build finishes, the query runs")
+	h.call("POST", fmt.Sprintf("/jobs/%d/2", r), ArrivalRequest{Seq: 0, DurationMs: 50, NeedsIndex: true}, nil)
+	report(2, ReportRequest{QueueDepth: 1, WaitingNeedsIndex: 1, OldestWaitMs: 900, BuildProgress: 0.6})
 	if code := h.call("POST", "/builds/"+b2.BuildID+"/done", nil, nil); code != 200 {
 		t.Fatalf("local done: %d", code)
 	}
@@ -181,11 +198,22 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 	h.call("POST", fmt.Sprintf("/jobs/%d/2/0/start", r), nil, nil)
 	h.call("POST", fmt.Sprintf("/jobs/%d/2/0/done", r), nil, nil)
 
+	t.Log("--- the round is still open: shard 2 has not said its stream is done")
+	var rs RoundStatus
+	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
+	if rs.Round.FinishedAt != nil {
+		t.Fatal("round finished before shard 2 reported stream_done")
+	}
+	report(2, ReportRequest{QueueDepth: 0, StreamDone: true})
+
 	t.Log("--- the reaper tick (or a GET) stamps the round finished")
 	reaper.Tick(ctx, h.st, h.log)
 	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
 	if rs.Round.FinishedAt == nil {
 		t.Fatal("round not finished")
+	}
+	if len(rs.Builds) != 2 || len(rs.Jobs) != 3 || len(rs.Statuses) != 2 {
+		t.Fatalf("status: builds=%d jobs=%d statuses=%d", len(rs.Builds), len(rs.Jobs), len(rs.Statuses))
 	}
 	for _, b := range rs.Builds {
 		t.Logf("    build %s: %s/%s attempt %d", b.BuildID, b.Placement, b.State, b.Attempt)
@@ -194,6 +222,45 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 		}
 	}
 	t.Logf("    round %d finished; duration %s", r, rs.Round.FinishedAt.Sub(rs.Round.StartedAt).Round(time.Millisecond))
+}
+
+func TestReportReflectsPreemption(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	var cr CreateRoundResponse
+	h.call("POST", "/rounds", CreateRoundRequest{Scenario: "test", Seed: 1, NShards: 1}, &cr)
+	r := cr.RoundID
+	h.st.Heartbeat(ctx, "small", 1) //nolint:errcheck
+	var b SubmitBuildResponse
+	h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 0, NVectors: 100_000, Dim: 128}, &b)
+	if b.Placement != "local" {
+		t.Fatalf("expected local (1-byte worker), got %s", b.Placement)
+	}
+	t.Log("--- shard 0 builds locally and reports a growing queue")
+	var rr ReportResponse
+	h.call("POST", fmt.Sprintf("/shards/%d/0/report", r), ReportRequest{QueueDepth: 5, WaitingNeedsIndex: 1, OldestWaitMs: 4000, BuildProgress: 0.2}, &rr)
+	if rr.Build.Placement != "local" || rr.Build.State != "running" {
+		t.Fatalf("reply: %+v", rr.Build)
+	}
+	t.Log("--- (Phase 3 reconsider) preempts the build to the gpu queue")
+	if ok, _ := h.st.PreemptToGPU(ctx, b.BuildID, 5); !ok {
+		t.Fatal("preempt failed")
+	}
+	t.Log("--- the shard's next report tells it: abort the local build")
+	h.call("POST", fmt.Sprintf("/shards/%d/0/report", r), ReportRequest{QueueDepth: 6, WaitingNeedsIndex: 1, OldestWaitMs: 4500, BuildProgress: 0.3}, &rr)
+	if rr.Build.Placement != "gpu" || rr.Build.State != "queued" {
+		t.Fatalf("reply after preempt: %+v", rr.Build)
+	}
+	if code := h.call("POST", "/builds/"+b.BuildID+"/done", nil, nil); code != 409 {
+		t.Fatalf("a preempted shard's done must be refused, got %d", code)
+	}
+	t.Log("--- a report for a shard with no build is 404; out-of-range fields are 400")
+	if code := h.call("POST", fmt.Sprintf("/shards/%d/7/report", r), ReportRequest{}, nil); code != 404 {
+		t.Fatalf("report without build: %d", code)
+	}
+	if code := h.call("POST", fmt.Sprintf("/shards/%d/0/report", r), ReportRequest{QueueDepth: 1, WaitingNeedsIndex: 2}, nil); code != 400 {
+		t.Fatalf("bad report: %d", code)
+	}
 }
 
 func TestValidationAndNotFound(t *testing.T) {
@@ -211,6 +278,8 @@ func TestValidationAndNotFound(t *testing.T) {
 		{"POST", "/builds", SubmitBuildRequest{RoundID: 1, ShardID: 1, NVectors: 0, Dim: 4}, 400},
 		{"POST", "/builds/nope/done", nil, 404},
 		{"POST", "/jobs/999999/1/0/start", nil, 404},
+		{"GET", "/builds/nope", nil, 404},
+		{"POST", "/jobs/999999/1", ArrivalRequest{Seq: -1}, 400},
 		{"GET", "/healthz", nil, 200},
 	}
 	for _, c := range cases {
@@ -258,6 +327,9 @@ func TestSubmitValidationAgainstRound(t *testing.T) {
 			t.Fatal("expected a claimable build")
 		}
 		h.st.Complete(ctx, c.BuildID, c.Attempt) //nolint:errcheck
+	}
+	for _, shard := range []int32{7, 42} {
+		h.call("POST", fmt.Sprintf("/shards/%d/%d/report", r, shard), ReportRequest{StreamDone: true}, nil)
 	}
 	var rs RoundStatus
 	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)

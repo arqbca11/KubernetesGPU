@@ -2,11 +2,14 @@
 // never do (they use SQL directly, see design decision 4).
 //
 //	POST /rounds                                 start a round
-//	GET  /rounds/{id}                            round status with every build and job
-//	POST /builds                                 submit a build (+ follow-up jobs); returns placement
+//	GET  /rounds/{id}                            round status: builds, queries, shard reports
+//	POST /builds                                 submit a build; returns placement and estimates
+//	GET  /builds/{id}                            the build row
 //	POST /builds/{id}/done                       a shard finished a local build
-//	POST /jobs/{round}/{shard}/{seq}/start       a follow-up job began
-//	POST /jobs/{round}/{shard}/{seq}/done        a follow-up job ended
+//	POST /jobs/{round}/{shard}                   a query arrived at the shard
+//	POST /jobs/{round}/{shard}/{seq}/start       the query began running
+//	POST /jobs/{round}/{shard}/{seq}/done        the query finished
+//	POST /shards/{round}/{shard}/report          the shard's load report; reply carries the build's placement
 //	GET  /workers                                registered workers and the live pool state
 //	GET  /healthz                                200 when Postgres answers
 package api
@@ -44,7 +47,10 @@ func New(st *store.Store, pol policy.Policy, cm costmodel.Model, cfg Config, log
 	s.mux.HandleFunc("POST /rounds", s.createRound)
 	s.mux.HandleFunc("GET /rounds/{id}", s.getRound)
 	s.mux.HandleFunc("POST /builds", s.submitBuild)
+	s.mux.HandleFunc("GET /builds/{id}", s.getBuild)
 	s.mux.HandleFunc("POST /builds/{id}/done", s.localBuildDone)
+	s.mux.HandleFunc("POST /jobs/{round}/{shard}", s.jobArrived)
+	s.mux.HandleFunc("POST /shards/{round}/{shard}/report", s.shardReport)
 	s.mux.HandleFunc("POST /jobs/{round}/{shard}/{seq}/start", s.jobStart)
 	s.mux.HandleFunc("POST /jobs/{round}/{shard}/{seq}/done", s.jobDone)
 	s.mux.HandleFunc("GET /workers", s.workers)
@@ -88,9 +94,10 @@ func (s *Server) createRound(w http.ResponseWriter, r *http.Request) {
 }
 
 type RoundStatus struct {
-	Round  store.Round      `json:"round"`
-	Builds []store.BuildRow `json:"builds"`
-	Jobs   []store.JobRow   `json:"jobs"`
+	Round    store.Round         `json:"round"`
+	Builds   []store.BuildRow    `json:"builds"`
+	Jobs     []store.JobRow      `json:"jobs"`
+	Statuses []store.ShardStatus `json:"shard_status"`
 }
 
 func (s *Server) getRound(w http.ResponseWriter, r *http.Request) {
@@ -124,28 +131,30 @@ func (s *Server) getRound(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, "list jobs", err)
 		return
 	}
+	statuses, err := s.st.ListShardStatus(ctx, id)
+	if err != nil {
+		s.internal(w, "list shard status", err)
+		return
+	}
 	if builds == nil {
 		builds = []store.BuildRow{}
 	}
 	if jobs == nil {
 		jobs = []store.JobRow{}
 	}
-	writeJSON(w, http.StatusOK, RoundStatus{Round: rd, Builds: builds, Jobs: jobs})
+	if statuses == nil {
+		statuses = []store.ShardStatus{}
+	}
+	writeJSON(w, http.StatusOK, RoundStatus{Round: rd, Builds: builds, Jobs: jobs, Statuses: statuses})
 }
 
 // ---- builds ---------------------------------------------------------------
 
-type JobRequest struct {
-	DurationMs int64 `json:"duration_ms"`
-	NeedsIndex bool  `json:"needs_index"`
-}
-
 type SubmitBuildRequest struct {
-	RoundID  int64        `json:"round_id"`
-	ShardID  int32        `json:"shard_id"`
-	NVectors int64        `json:"n_vectors"`
-	Dim      int32        `json:"dim"`
-	Jobs     []JobRequest `json:"jobs"` // in execution order; seq is the index
+	RoundID  int64 `json:"round_id"`
+	ShardID  int32 `json:"shard_id"`
+	NVectors int64 `json:"n_vectors"`
+	Dim      int32 `json:"dim"`
 }
 
 type SubmitBuildResponse struct {
@@ -168,12 +177,6 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 	if req.RoundID <= 0 || req.ShardID < 0 || req.NVectors <= 0 || req.Dim <= 0 {
 		writeError(w, http.StatusBadRequest, "round_id, n_vectors and dim must be positive; shard_id non-negative")
 		return
-	}
-	for i, j := range req.Jobs {
-		if j.DurationMs < 0 {
-			writeError(w, http.StatusBadRequest, "jobs["+strconv.Itoa(i)+"].duration_ms must be non-negative")
-			return
-		}
 	}
 	ctx := r.Context()
 	rd, found, err := s.st.GetRound(ctx, req.RoundID)
@@ -212,17 +215,12 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := policy.BuildSpec{ShardID: req.ShardID, RoundID: req.RoundID, NVectors: req.NVectors, Dim: req.Dim, MemBytes: mem}
-	jobs := make([]store.JobSpec, len(req.Jobs))
-	for i, j := range req.Jobs {
-		spec.Jobs = append(spec.Jobs, policy.Job{DurationMs: j.DurationMs, NeedsIndex: j.NeedsIndex})
-		jobs[i] = store.JobSpec{Seq: int32(i), DurationMs: j.DurationMs, NeedsIndex: j.NeedsIndex}
-	}
 	dec := s.pol.Decide(policy.Input{Build: spec, Pool: policy.PoolState{LiveWorkers: pool.LiveWorkers, LargestMem: pool.LargestMem}})
 
 	inserted, err := s.st.SubmitBuild(ctx, store.Build{
 		BuildID: buildID, RoundID: req.RoundID, ShardID: req.ShardID, NVectors: req.NVectors,
 		Dim: req.Dim, MemBytes: mem, Placement: dec.Placement, Priority: dec.Priority,
-	}, jobs)
+	})
 	if errors.Is(err, store.ErrRoundFull) || errors.Is(err, store.ErrRoundFinished) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -246,7 +244,7 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("build placed", "build_id", buildID, "round_id", req.RoundID, "attempt", 0,
 		"shard_id", req.ShardID, "placement", dec.Placement, "priority", dec.Priority, "policy", s.pol.Name(),
 		"reason", dec.Reason, "n_vectors", req.NVectors, "dim", req.Dim, "mem_bytes", mem,
-		"live_workers", pool.LiveWorkers, "jobs", len(jobs))
+		"live_workers", pool.LiveWorkers)
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -266,6 +264,120 @@ func (s *Server) writeDuplicate(w http.ResponseWriter, existing store.BuildRow) 
 		CPUBuildMs: s.cm.CPUBuild(existing.NVectors, existing.Dim).Milliseconds(),
 		GPUTotalMs: s.cm.GPUTotal(existing.NVectors, existing.Dim).Milliseconds(),
 	})
+}
+
+func (s *Server) getBuild(w http.ResponseWriter, r *http.Request) {
+	b, found, err := s.st.GetBuild(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.internal(w, "get build", err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such build")
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
+}
+
+// ---- query arrivals and shard reports --------------------------------------
+
+type ArrivalRequest struct {
+	Seq        int32 `json:"seq"`
+	DurationMs int64 `json:"duration_ms"`
+	NeedsIndex bool  `json:"needs_index"`
+}
+
+// jobArrived records a query arriving at a shard (decision 28).
+func (s *Server) jobArrived(w http.ResponseWriter, r *http.Request) {
+	round, ok := pathInt64(w, r, "round")
+	if !ok {
+		return
+	}
+	shard, ok := pathInt32(w, r, "shard")
+	if !ok {
+		return
+	}
+	var req ArrivalRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Seq < 0 || req.DurationMs < 0 {
+		writeError(w, http.StatusBadRequest, "seq and duration_ms must be non-negative")
+		return
+	}
+	inserted, err := s.st.RecordArrival(r.Context(), round, shard, req.Seq, req.DurationMs, req.NeedsIndex)
+	if err != nil {
+		s.internal(w, "record arrival", err)
+		return
+	}
+	code := http.StatusOK
+	if inserted {
+		code = http.StatusCreated
+		s.log.Info("query arrived", "round_id", round, "shard_id", shard, "seq", req.Seq,
+			"build_id", store.BuildID(shard, round), "duration_ms", req.DurationMs, "needs_index", req.NeedsIndex)
+	}
+	writeJSON(w, code, map[string]any{"round_id": round, "shard_id": shard, "seq": req.Seq, "created": inserted})
+}
+
+type ReportRequest struct {
+	QueueDepth        int32   `json:"queue_depth"`
+	WaitingNeedsIndex int32   `json:"waiting_needs_index"`
+	OldestWaitMs      int64   `json:"oldest_wait_ms"`
+	BuildProgress     float32 `json:"build_progress"`
+	StreamDone        bool    `json:"stream_done"`
+}
+
+type BuildSummary struct {
+	BuildID   string `json:"build_id"`
+	Placement string `json:"placement"`
+	State     string `json:"state"`
+	Attempt   int32  `json:"attempt"`
+}
+
+type ReportResponse struct {
+	Build BuildSummary `json:"build"`
+}
+
+// shardReport is the shard's sync point (decision 29): it tells the scheduler
+// its load and learns the build's current placement in the same round trip.
+func (s *Server) shardReport(w http.ResponseWriter, r *http.Request) {
+	round, ok := pathInt64(w, r, "round")
+	if !ok {
+		return
+	}
+	shard, ok := pathInt32(w, r, "shard")
+	if !ok {
+		return
+	}
+	var req ReportRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.QueueDepth < 0 || req.WaitingNeedsIndex < 0 || req.WaitingNeedsIndex > req.QueueDepth ||
+		req.OldestWaitMs < 0 || req.BuildProgress < 0 || req.BuildProgress > 1 {
+		writeError(w, http.StatusBadRequest, "report fields out of range")
+		return
+	}
+	ctx := r.Context()
+	b, found, err := s.st.GetBuild(ctx, store.BuildID(shard, round))
+	if err != nil {
+		s.internal(w, "get build", err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "this shard has no build in this round; submit first")
+		return
+	}
+	if err := s.st.ReportStatus(ctx, store.ShardStatus{
+		RoundID: round, ShardID: shard, QueueDepth: req.QueueDepth, WaitingNeedsIndex: req.WaitingNeedsIndex,
+		OldestWaitMs: req.OldestWaitMs, BuildProgress: req.BuildProgress, StreamDone: req.StreamDone,
+	}); err != nil {
+		s.internal(w, "report status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ReportResponse{Build: BuildSummary{
+		BuildID: b.BuildID, Placement: b.Placement, State: b.State, Attempt: b.Attempt,
+	}})
 }
 
 func (s *Server) localBuildDone(w http.ResponseWriter, r *http.Request) {

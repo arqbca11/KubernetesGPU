@@ -5,20 +5,14 @@ package policy
 
 import "fmt"
 
-// Job is one follow-up job on the submitting shard.
-type Job struct {
-	DurationMs int64
-	NeedsIndex bool
-}
-
-// BuildSpec is what the shard tells us about the build.
+// BuildSpec is what the shard tells us about the build. Nothing about the
+// queries to come: a real shard does not know them (decision 28).
 type BuildSpec struct {
 	ShardID  int32
 	RoundID  int64
 	NVectors int64
 	Dim      int32
 	MemBytes int64 // modeled GPU memory need, from the cost model
-	Jobs     []Job
 }
 
 // PoolState is what the scheduler knows about live GPU workers.

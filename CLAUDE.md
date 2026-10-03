@@ -1,6 +1,6 @@
 # Shard-to-GPU index build scheduler
 
-A scheduler that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has finished its build and all of its follow-up jobs. One slow shard holds up the whole round.
+A scheduler that schedules HNSW vector index builds from ~50 database shards onto a small shared pool of GPU workers, with the option to build locally on the shard's CPU instead. The goal is to minimize **round completion time**: how long until every shard has built its index and drained the queries the build held up. One slow shard holds up the whole round.
 
 Start small: the default configuration is **6 shards and 2 GPU workers**. Scaling to 50 shards is a config change, done once the small setup runs end to end.
 
@@ -16,7 +16,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 | Component | Role | Language |
 | --- | --- | --- |
 | `scheduler/` | Decides local vs GPU per build, owns the queue, reaps expired leases, tracks rounds | Go |
-| `shard/` | Simulates N shards (goroutines), each with a sequential CPU queue for local builds and follow-up jobs | Go |
+| `shard/` | Simulates N shards (goroutines), each with a CPU that runs its local build and its arriving queries, and reports its load to the scheduler | Go |
 | `worker/` | Pulls GPU jobs, renews its lease, runs the build, publishes the result | Python |
 | `db/migrations/` | Postgres schema; Postgres is the only source of truth | SQL |
 | `experiments/` | Seeded workloads, discrete-event simulator, runner, results | Go / Python |
@@ -37,13 +37,14 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 
 ## Modeling assumptions (all config flags)
 
-- A **round** gives every shard one index build and a list of **follow-up jobs**. It ends when every shard has finished its build and all of its follow-up jobs.
-- A **follow-up job** is any CPU work the shard does after submitting its build: an OLTP batch, a query workload, anything. Each has a CPU duration and a flag `needs_index`. The old "one OLTP job" model is the special case of a one-job list. **Follow-up jobs are never scheduled or placed.** They run on the shard regardless. They are in the model because they are the cost of a local build made measurable: without them, placement would depend only on build speed and the straggler effect would be invisible. The scheduler records them for round completion and the timeline, and (from Phase 3) reads them as policy input: a shard's projected finish is its build plus its jobs, and that projection sets its queue priority. A real shard would not declare a job list; the scheduler would estimate remaining work from its backlog. The declared list is the simulation's stand-in for that. A round with empty job lists is the narrower "builds only" case.
-- A **local build** occupies the shard's CPU; no follow-up job runs until it finishes.
-- An **offloaded build** frees the CPU. Follow-up jobs with `needs_index = false` run immediately; those with `needs_index = true` wait for the build to complete wherever it ran.
-- Follow-up jobs on a shard run sequentially, in order. They are CPU-only and never go to the GPU pool.
-- A **GPU worker** runs one build at a time and has a modeled memory capacity. A build whose modeled memory need exceeds every worker's capacity must build locally.
-- **Workloads are scenarios**: a seeded combination of a size distribution (uniform, Zipf, bimodal), a follow-up profile, an arrival pattern (all at once or staggered), and a pool configuration. Zipf with all-at-once arrival is the default. The scenario table is in `docs/roadmap.md` (Phase 3).
+- A **round** begins when every shard receives its index build (the DDL). Each shard also has a **query stream**: a seeded, finite sequence of queries arriving over time during the round, each with a CPU duration and a `needs_index` flag. A shard is done when its build is terminal, its stream is exhausted, and its query backlog has drained. The round ends when every shard is done. Round completion time is therefore the cluster's **recovery time from the DDL**: how long the slowest shard holds everyone up, measured by the work it blocked.
+- **Nobody declares queries in advance.** A real shard receiving a DDL knows the build's size and nothing about the queries to come. The scheduler learns a shard's load only from what the shard **reports** periodically: queue depth, how many waiting queries need the index, oldest wait, build progress. A real database exposes exactly these. The simulator knows the future and may hand it to a *clairvoyant* oracle policy for comparison, never to a deployable one.
+- **A local build occupies the shard's CPU.** Queries queue behind it; the backlog grows at the arrival rate for as long as the build runs.
+- **An offloaded build frees the CPU.** Queries that don't need the index run as they arrive; those that do wait until the build completes wherever it ran. The shard's CPU runs ready queries one at a time in arrival order, skipping queries whose index isn't ready yet (they wait, they don't block others).
+- **Placement can change while a build is in flight.** A local build can be **preempted**: it is killed, its CPU progress is lost, the CPU is freed, and the build joins the GPU queue with a priority that grows with the blocked work behind it. A queued GPU build can be moved back to local. A build leased to a GPU worker is never preempted (Phase 3). The shard learns of any change through the reply to its own periodic report, never by push.
+- **Queries are never scheduled or placed.** They run on their shard regardless. They are in the model because they are the cost of a slow or badly placed build made measurable: without them, placement would depend only on build speed and the straggler effect would be invisible. A round with empty streams is the narrower "builds only" case.
+- A **GPU worker** runs one build at a time and has a modeled memory capacity. A build whose modeled memory need exceeds every live worker's capacity must build locally.
+- **Workloads are scenarios**: a seeded combination of a size distribution (uniform, Zipf, bimodal), a query stream profile per shard (arrival rate, duration, `needs_index` fraction, horizon), a DDL arrival pattern (all at once or staggered), and a pool configuration. Zipf with all-at-once arrival is the default. The scenario table is in `docs/roadmap.md` (Phase 3).
 
 ## Conventions
 

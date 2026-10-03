@@ -6,6 +6,8 @@
 
 Build a scheduler that stays correct under failures, using builds that only sleep. Everything runs locally under Docker Compose. Default configuration: 6 shards, 2 GPU workers. The policy is the trivial one: every build goes to the GPU queue unless it does not fit in any worker's memory.
 
+**Model revision, 2026-10-02.** The first version of this doc had each shard declare its follow-up jobs at submit time. The owner pointed out that a real shard receiving a DDL knows nothing about the queries to come, so a policy fed that list would be using information no production scheduler has. The model is now: queries arrive over the round as a seeded stream; the shard records each one as it arrives and reports its load periodically; placement can change in flight (preemption of a local build, reneging of a queued GPU build), and the shard learns of changes in the reply to its own report. Decisions 28 onward record the revision; decision 17 is superseded.
+
 **Done when** a worker killed mid-build still results in that build finishing exactly once, at both 6 and 50 shards, and the other three failure tests pass (SIGSTOP past lease expiry, scheduler restart mid-round, duplicate submit).
 
 ## System diagram
@@ -15,25 +17,25 @@ Four kinds of process on one Docker network. Postgres is the only stateful one. 
 ```mermaid
 flowchart LR
     subgraph shardsim["shard simulator (1 process)"]
-        S1["shard 1<br/>CPU queue"]
-        S2["shard 2<br/>CPU queue"]
-        SN["shard N<br/>CPU queue"]
+        S1["shard 1<br/>CPU: build + queries<br/>query stream"]
+        S2["shard 2"]
+        SN["shard N"]
     end
 
     subgraph sched["scheduler (Go)"]
-        API["HTTP API<br/>rounds, builds, jobs"]
+        API["HTTP API<br/>rounds, builds, queries,<br/>shard reports"]
         POL["policy v0<br/>always GPU if it fits"]
         REAP["reaper<br/>every few seconds"]
     end
 
-    PG[("Postgres<br/>rounds, builds,<br/>shard_jobs, workers")]
+    PG[("Postgres<br/>rounds, builds, shard_jobs,<br/>shard_status, workers")]
 
     subgraph workers["GPU workers (Python)"]
         W1["worker 1<br/>claim, renew, sleep, complete"]
         W2["worker 2"]
     end
 
-    S1 & S2 & SN -- "submit build,<br/>report job done,<br/>poll round" --> API
+    S1 & S2 & SN -- "submit build, record queries,<br/>report load (reply: placement),<br/>poll round" --> API
     API --> POL
     API -- "INSERT / SELECT" --> PG
     REAP -- "expired leases to queued" --> PG
@@ -59,8 +61,15 @@ sequenceDiagram
     S->>A: POST /builds {shard k, round r, n_vectors, dim}
     A->>A: policy.decide → gpu, priority
     A->>P: INSERT builds (build_id k:r, placement gpu, state queued)
-    A-->>S: {placement: gpu}
-    Note over S: CPU is free. Follow-up jobs with<br/>needs_index=false start now.
+    A-->>S: {placement: gpu, estimates}
+    Note over S: CPU is free. Queries arrive. Those with<br/>needs_index=false run as they come.
+
+    loop every poll interval
+        S->>A: POST /shards/r/k/report {queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done}
+        A->>P: UPSERT shard_status, SELECT build
+        A-->>S: {build: placement, state, attempt}
+    end
+    S->>A: POST /jobs/r/k (each query as it arrives)
 
     loop until a row is returned
         W->>P: claim: UPDATE … state=leased, attempt+1 … FOR UPDATE SKIP LOCKED
@@ -74,17 +83,12 @@ sequenceDiagram
     end
 
     W->>P: complete: UPDATE state=done WHERE build_id AND attempt
-    loop while a needs_index job is waiting (poll interval, default 500 ms)
-        S->>A: GET /builds/k:r
-        A->>P: SELECT state
-        A-->>S: state
-    end
-    Note over S: state=done: the needs_index job starts.
-    S->>A: GET /rounds/r
-    A->>P: SELECT builds, shard_jobs for round r
+    Note over S: next report reply says state=done:<br/>queries with needs_index=true become runnable.
+    S->>A: POST /jobs/r/k/{seq}/start and /done as queries run
+    Note over S: stream exhausted and backlog empty:<br/>report stream_done=true, queue_depth=0
 ```
 
-### A local build
+### A local build, and its preemption
 
 ```mermaid
 sequenceDiagram
@@ -95,13 +99,22 @@ sequenceDiagram
     S->>A: POST /builds
     A->>A: policy.decide → local
     A->>P: INSERT builds (placement local, state running)
-    A-->>S: {placement: local}
-    Note over S: CPU busy. No follow-up job runs.
-    S->>S: sleep(modeled CPU build time)
-    S->>A: POST /builds/k:r/done
-    A->>P: UPDATE state=done WHERE build_id AND placement=local
-    Note over S: Follow-up jobs run in order.
+    A-->>S: {placement: local, cpu_build_ms}
+    Note over S: CPU busy with the build. Queries arrive and queue.
+    loop every poll interval
+        S->>A: POST /shards/r/k/report {queue_depth grows, build_progress}
+        A-->>S: {build: local, running}
+    end
+    Note over A: Phase 3 reconsider: migrating would recover sooner
+    A->>P: UPDATE builds SET placement=gpu, state=queued, priority=p<br/>WHERE build_id AND placement=local AND state=running
+    S->>A: POST /shards/r/k/report
+    A-->>S: {build: gpu, queued}
+    Note over S: abort the local build, free the CPU.<br/>Queries with needs_index=false start draining now.
+    S->>A: POST /builds/k:r/done (if the shard had finished anyway)
+    A-->>S: 409: not a running local build
 ```
+
+In Phase 1 the policy never preempts, but the transition, the report path and the shard's reaction exist so the simulator is built right.
 
 ### Build row state machine
 
@@ -110,6 +123,8 @@ stateDiagram-v2
     [*] --> queued: submit (placement gpu)
     [*] --> running: submit (placement local)
     queued --> leased: claim (attempt + 1)
+    queued --> running: renege to local (Phase 3)
+    running --> queued: preempt to gpu (Phase 3)
     leased --> done: complete (guarded by build_id + attempt)
     leased --> queued: reap (lease_until < now)
     leased --> failed: worker reports error (guarded)
@@ -118,7 +133,7 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-`attempt` only changes on the `queued → leased` edge. Every edge out of `leased` is a conditional update on `build_id` and `attempt`. A worker whose update touches zero rows has lost the lease and stops.
+`attempt` only changes on the `queued → leased` edge. Every edge out of `leased` is a conditional update on `build_id` and `attempt`. A worker whose update touches zero rows has lost the lease and stops. The two Phase 3 edges flip `placement` as well as `state`; a shard whose local build was preempted finds out because its `done` call is refused, or earlier from its report reply.
 
 ### Failure: worker killed mid-build
 
@@ -139,9 +154,9 @@ sequenceDiagram
 
 The SIGSTOP variant is the same picture except worker 1 comes back: its renew and complete carry `attempt = 1`, match zero rows, and it abandons the build. That is the paused-process case fencing tokens exist for.
 
-### Shard CPU queue
+### Shard CPU, and how the queue grows
 
-Each shard is a goroutine draining a sequential queue. The two rules from the modeling assumptions, drawn for one shard with three follow-up jobs where only the third needs the index:
+Each shard is a goroutine with one CPU. Queries arrive from its seeded stream at rate λ. The CPU runs one thing at a time: the local build if there is one, otherwise the oldest ready query. A query is ready if it doesn't need the index, or the index is built. Drawn for one shard with a 10 s build and four queries, two of which need the index:
 
 ```mermaid
 gantt
@@ -149,17 +164,19 @@ gantt
     axisFormat %s
     section local build
     build on CPU            :a1, 0, 10
-    job 1                   :a2, after a1, 3
-    job 2                   :a3, after a2, 3
-    job 3 (needs index)     :a4, after a3, 4
+    q1 (arrived 1)          :a2, after a1, 2
+    q2 needs idx (arr 3)    :a3, after a2, 2
+    q3 (arrived 5)          :a4, after a3, 2
+    q4 needs idx (arr 7)    :a5, after a4, 2
     section offloaded build
     build on GPU (queue + build) :b1, 0, 8
-    job 1                   :b2, 0, 3
-    job 2                   :b3, after b2, 3
-    job 3 (needs index)     :b4, after b1, 4
+    q1 (arrived 1)          :b2, 1, 2
+    q3 (arrived 5)          :b3, 5, 2
+    q2 needs idx (arr 3)    :b4, after b1, 2
+    q4 needs idx (arr 7)    :b5, after b4, 2
 ```
 
-Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is later: the end of job 2 or the GPU build. If the GPU queue is long enough that the build finishes after time 10, offloading loses.
+Local: the backlog grows at λ for the whole build, then drains at (service rate − λ). Everything waits, including queries that never needed the index. Offloaded: q1 and q3 run on arrival; q2 and q4 wait for the GPU. The shard recovers at 12 instead of 18. If the GPU queue were long enough that the build finished after 14 or so, local would win. The report carries exactly what this picture needs: queue depth, how many waiting queries need the index, how long the oldest has waited, and how far the local build has got.
 
 ## Design decisions
 
@@ -181,7 +198,7 @@ Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is lat
 | 14 | State and placement rules are `CHECK` constraints in the schema, not only application logic | Trust the application | A row can never be `queued` with `placement = 'local'`, or `leased` without a lease. Bugs in any client fail loudly at the database. |
 | 15 | `Release` (guarded move from `leased` back to `queued`) is in the store from day one | Add in Phase 2 with SIGTERM handling | It is one more guarded update and is tested alongside the others; Phase 2 only wires it to a signal. |
 | 16 | `rounds.n_shards`: a round declares how many shards it expects (migration 0002) | The client closes the round explicitly | The scheduler can then tell "every shard is done" from "the shards seen so far are done", which matters once arrivals are staggered (Phase 3). Completion logic stays in Postgres. Chosen by the owner on 2026-10-02. |
-| 17 | A shard declares its follow-up jobs in the same submit call as the build, and both are inserted in one transaction | Register jobs separately; or have the round creator declare every shard's workload up front | Phase 3's `decide` needs the job list as an input, so it must arrive with the build. One transaction means a build never exists without its jobs. |
+| 17 | ~~A shard declares its follow-up jobs in the same submit call as the build~~ **Superseded by 28.** | | Declared future work is information a real shard does not have. |
 | 18 | Round completion is computed by one idempotent `UPDATE` run on every reaper tick and before every `GET /rounds/{id}`; `finished_at` is the latest build or job finish, not the time of the check | Stamp the round in the handler that records the last completion | GPU completions happen over SQL from workers, so no handler sees them. Using the latest child finish makes the round duration independent of the tick interval. |
 | 19 | With zero live workers, policy v0 still places on the GPU queue | Fall back to local when the pool is empty | "Nothing fits" is a statement about workers we can see. An empty pool may be cold-starting (Phase 5), and Compose start order should not turn a whole round local. The memory rule applies only when at least one worker is live. |
 | 20 | Cost model v0 lives in `scheduler/costmodel` as pure functions of `n_vectors` and `dim`, with every constant overridable by env; the submit response returns the CPU and GPU estimates | Hard-code sleep times in the worker and shard | One source for the numbers the scheduler, shard and worker all need. The shard sleeps for `cpu_build_ms` on a local build; the Python worker reimplements the same formulas and must stay in step. |
@@ -192,6 +209,11 @@ Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is lat
 | 25 | `Renew` has no `lease_until > now()` check: a worker that wakes after expiry but before the reaper acts may renew and continue | Reject renew once the deadline has passed | No one else owns the row until the reaper or a claimer acts, so continuing is safe and keeps the work. The lease is lost exactly when `attempt` stops matching. (Cross-check gap 2.) |
 | 26 | "Fits" means `mem_bytes <= capacity`; a heartbeat with a new `mem_bytes` updates the worker's capacity; two simultaneous submits of one `build_id` yield exactly one `created:true` because the insert is `ON CONFLICT DO NOTHING` | | Stated so the spec says it. (Cross-check gaps 6, 8, 9.) |
 | 27 | Submit validation: the round must exist (404); a new build is refused with 409 when the round already holds `n_shards` builds or has finished, enforced inside `SubmitBuild` under `SELECT … FOR UPDATE` on the round row; `n_shards` must be positive (400); a lease duration must be positive (store returns an error). `shard_id` is any non-negative integer. | Require `shard_id` in `0..n_shards-1` (the first version of this row) | Completion counts builds against `n_shards`, so the cap is what prevents an early finish. A dense id range was tried first and rejected the same day: both the implementer's and the cross-checker's tests had independently numbered shards 1-based or sparsely, which showed the range rule encoded an assumption the spec never made. The row lock serialises submits per round so the cap holds under concurrency. (Cross-check gaps 4, 8.) |
+| 28 | **Queries are an arriving stream, not a declared list.** The shard records each query when it arrives (`POST /jobs/{round}/{shard}`), the submit call carries no jobs, and the policy sees only the shard's reports | Declare jobs at submit (decision 17) | A shard receiving a DDL knows the build's size and nothing about the queries to come. A policy fed the future would be an oracle, not a scheduler. The simulator still knows the future and gives it only to the clairvoyant policy, to measure what not knowing costs. Owner's call, 2026-10-02. |
+| 29 | **The shard's periodic report is its sync point.** `POST /shards/{round}/{shard}/report` upserts `shard_status` and replies with the build's current placement, state and attempt. The shard acts on the reply: abort a preempted local build, start a build moved to local, run `needs_index` queries once the build is done | Separate polling (decision 23) plus a push channel for placement changes | One call, one direction, no push, no address book. The scheduler learns the shard's load and the shard learns the scheduler's decision in the same round trip. Decision 23's `GET /builds/{id}` remains for debugging and tests. |
+| 30 | **Finite query stream per round.** The generator produces a seeded, finite sequence per shard; the shard reports `stream_done` when exhausted. Round completion = `n_shards` shards with `stream_done`, all their queries finished, all builds terminal | Continuous stream with a "recovered to steady state" criterion | Deterministic and simple to end. Realism beyond this needs real load data, which does not exist yet; the point is to have thought through how the queue grows, not to model production traffic. Owner's call, 2026-10-02. |
+| 31 | **In-flight placement changes are two more guarded transitions.** Preempt: `running` → `queued` with `placement` flipped to `gpu`, `started_at` cleared, `priority` set, guarded by `placement = 'local' AND state = 'running'`. Renege: `queued` → `running` with `placement` flipped to `local`, guarded by `placement = 'gpu' AND state = 'queued'`. A `leased` build is never moved. `attempt` is untouched by both | Cancel and resubmit under a new id | Same row, same idempotency key, same timeline. The guards make a change race-free against a concurrent claim or completion, and a shard that didn't notice a preemption is refused at `done` by the existing guard. Phase 1 ships the transitions and tests them; Phase 3 ships the policy that uses them. |
+| 32 | **Queue semantics on the shard:** one CPU, runs the local build if any, else the oldest ready query; a query is ready if it doesn't need the index or the index is built; queries that aren't ready wait without blocking others | Strict FIFO where a `needs_index` query at the head blocks everything behind it | Sessions in a real database are independent; a blocked one doesn't block the rest. This also makes "freeing the CPU" worth something even when some queries need the index. |
 
 ## Implementation notes
 
@@ -233,21 +255,35 @@ Lease length (30 s) and renew interval (10 s) are parameters of the calls, not c
 | `scheduler/cmd/scheduler/` | `main`: env config, connect to Postgres with backoff retry, migrate, start reaper, serve HTTP, graceful shutdown on SIGTERM. |
 | `scheduler/Dockerfile`, `.dockerignore` | Image build (decision 22). |
 
-The API as built:
+The API as built (revised 2026-10-02 for the query-stream model):
 
 | Method | Path | Caller | Effect |
 | --- | --- | --- | --- |
 | POST | `/rounds` | shard simulator | `{scenario, seed, n_shards}` → 201 `{round_id}` |
-| GET | `/rounds/{id}` | shard simulator | Finishes complete rounds, then returns the round, every build row and every job row |
-| POST | `/builds` | shard | `{round_id, shard_id, n_vectors, dim, jobs:[{duration_ms, needs_index}]}` → 201 with `{build_id, placement, priority, reason, mem_bytes, cpu_build_ms, gpu_total_ms, created:true}`. A repeat returns 200 with `created:false`; every field but `reason` is computed from the stored row, whatever the repeat's body says (invariant 6). 404 for an unknown round; 409 for a new build when the round already holds `n_shards` builds or has finished (a duplicate still gets its 200). `shard_id` is any non-negative integer; the scheduler does not assume shards are numbered densely. |
-| POST | `/builds/{id}/done` | shard | Local build finished. 409 unless the build is a running local build. |
-| POST | `/jobs/{round}/{shard}/{seq}/start`, `/done` | shard | Record follow-up job timing. 404 if no such job, 409 if it exists but is not in the right state (start twice, done before start, done twice). |
+| GET | `/rounds/{id}` | shard simulator | Finishes complete rounds, then returns the round, every build, every query and every shard status |
+| POST | `/builds` | shard | `{round_id, shard_id, n_vectors, dim}` → 201 with `{build_id, placement, priority, reason, mem_bytes, cpu_build_ms, gpu_total_ms, created:true}`. A repeat returns 200 with `created:false`; every field but `reason` comes from the stored row. 404 for an unknown round; 409 for a new build when the round already holds `n_shards` builds or has finished. |
+| GET | `/builds/{id}` | shard, tests | The build row |
+| POST | `/builds/{id}/done` | shard | Local build finished. 409 unless the build is a running local build (so a preempted shard finds out here at the latest). |
+| POST | `/jobs/{round}/{shard}` | shard | `{seq, duration_ms, needs_index}`: a query arrived → 201. Repeat of the same `seq` → 200, unchanged. |
+| POST | `/jobs/{round}/{shard}/{seq}/start`, `/done` | shard | Record when a query ran. 404 if no such query, 409 if wrong state. |
+| POST | `/shards/{round}/{shard}/report` | shard | `{queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done}` → 200 `{build: {placement, state, attempt}}`. Upserts `shard_status`. 404 if the shard has no build in the round. |
 | GET | `/workers` | anyone | Live pool state and every registered worker |
 | GET | `/healthz` | Compose, Kubernetes | 200 when Postgres answers |
 
 Tests added: `costmodel` (range and monotonicity), `policy` (the four placement cases and determinism), `store` (`RoundFinishesOnlyWhenEveryShardIsDone`, which walks a two-shard round through every partial state and checks the round is stamped only at the end, with `finished_at` equal to the last job's finish), `api` (`EndToEndRoundOverHTTP`: a two-shard round over HTTP with a GPU build claimed and completed through the store, a local build forced by memory, duplicate submit, job events, 409s, and round completion; `ValidationAndNotFound`).
 
-### Cross-check of steps 1 and 2 (2026-10-02)
+### Model revision applied to steps 1 and 2 (2026-10-02, later the same day)
+
+| Path | What |
+| --- | --- |
+| `db/migrations/0003_query_stream.sql` | `shard_jobs.arrived_at`; new `shard_status` table (decisions 28 to 30). |
+| `scheduler/store/` | `SubmitBuild` no longer takes jobs. New: `RecordArrival`, `ReportStatus`, `ListShardStatus`, `PreemptToGPU`, `RenegeToLocal`. `FinishCompleteRounds` now also requires `n_shards` shards with `stream_done`. |
+| `scheduler/api/` | Submit carries no jobs. New: `POST /jobs/{round}/{shard}` (arrival), `POST /shards/{round}/{shard}/report`, `GET /builds/{id}`. `GET /rounds/{id}` includes shard statuses. |
+| `scheduler/policy/` | `BuildSpec` has no job list. |
+
+Tests revised or added: store `RoundFinishesOnlyWhenEveryShardIsDone` (now walks arrivals, reports and the `stream_done` gate) and `PreemptAndRenegeTransitions` (decision 31, including that a leased build is never moved and a preempted shard's `done` is refused); api `EndToEndRoundOverHTTP` (arrivals, reports, the reply carrying the build's state, the round staying open until `stream_done`) and `ReportReflectsPreemption` (the shard learns of a preemption from its report reply). The old-spec cross-check tests were removed and the cross-check rerun against the revised spec; see below.
+
+### Cross-check of steps 1 and 2, first run (2026-10-02, before the model revision)
 
 An independent agent (`.claude/agents/crosscheck-tester.md`, Opus, fresh context) wrote 14 black-box tests in `scheduler/crosscheck/` from the spec alone, without reading the implementation. 13 passed. The one failure and the gaps it reported, with what was done:
 
