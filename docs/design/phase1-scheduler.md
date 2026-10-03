@@ -188,6 +188,10 @@ Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is lat
 | 21 | Standard-library HTTP only: `net/http` with Go 1.22 method-and-pattern routing, `encoding/json`, `log/slog` | A router or web framework | Eight routes do not justify a dependency. `DisallowUnknownFields` on request bodies catches client typos early. |
 | 22 | Scheduler image is a two-stage build onto `distroless/static`, running as non-root | Alpine or Debian runtime image | The binary is static; distroless has no shell or package manager, so the attack surface and image size are minimal. Health checks therefore go through the HTTP endpoint, not a shell command. |
 | 23 | A shard learns that its GPU build is done by polling `GET /builds/{id}` at a configurable interval, only while it has a `needs_index` job waiting and nothing else to run | Worker notifies the shard; scheduler pushes to the shard; long polling backed by `LISTEN/NOTIFY` | Workers talk only to Postgres, and the scheduler learns of GPU completions only from Postgres, so the shard asking is the only path that adds no new state or address book. The shard is blocked anyway, so polling costs it nothing. Added latency is at most one interval per shard and is recorded in the timeline so it is visible. OpenSearch's data nodes poll their remote build service the same way. Long polling is the upgrade if Phase 3 shows the artifact matters; the endpoint is shaped so the shard logic does not change. Chosen by the owner on 2026-10-02. |
+| 24 | `started_at` on a build means "when the current attempt started"; reap and release clear it along with the lease columns, and `enqueued_at` keeps the submit time | Keep the first attempt's start | The timeline wants the winning attempt's duration, and work lost to abandoned attempts is `finished_at - enqueued_at` minus the last attempt. One column cannot hold both; this reading is simpler. (Cross-check gap 1.) |
+| 25 | `Renew` has no `lease_until > now()` check: a worker that wakes after expiry but before the reaper acts may renew and continue | Reject renew once the deadline has passed | No one else owns the row until the reaper or a claimer acts, so continuing is safe and keeps the work. The lease is lost exactly when `attempt` stops matching. (Cross-check gap 2.) |
+| 26 | "Fits" means `mem_bytes <= capacity`; a heartbeat with a new `mem_bytes` updates the worker's capacity; two simultaneous submits of one `build_id` yield exactly one `created:true` because the insert is `ON CONFLICT DO NOTHING` | | Stated so the spec says it. (Cross-check gaps 6, 8, 9.) |
+| 27 | Submit validation: the round must exist (404); a new build is refused with 409 when the round already holds `n_shards` builds or has finished, enforced inside `SubmitBuild` under `SELECT … FOR UPDATE` on the round row; `n_shards` must be positive (400); a lease duration must be positive (store returns an error). `shard_id` is any non-negative integer. | Require `shard_id` in `0..n_shards-1` (the first version of this row) | Completion counts builds against `n_shards`, so the cap is what prevents an early finish. A dense id range was tried first and rejected the same day: both the implementer's and the cross-checker's tests had independently numbered shards 1-based or sparsely, which showed the range rule encoded an assumption the spec never made. The row lock serialises submits per round so the cap holds under concurrency. (Cross-check gaps 4, 8.) |
 
 ## Implementation notes
 
@@ -235,30 +239,35 @@ The API as built:
 | --- | --- | --- | --- |
 | POST | `/rounds` | shard simulator | `{scenario, seed, n_shards}` → 201 `{round_id}` |
 | GET | `/rounds/{id}` | shard simulator | Finishes complete rounds, then returns the round, every build row and every job row |
-| POST | `/builds` | shard | `{round_id, shard_id, n_vectors, dim, jobs:[{duration_ms, needs_index}]}` → 201 with `{build_id, placement, priority, reason, mem_bytes, cpu_build_ms, gpu_total_ms, created:true}`. A repeat returns 200 with `created:false` and the existing decision (invariant 6). |
+| POST | `/builds` | shard | `{round_id, shard_id, n_vectors, dim, jobs:[{duration_ms, needs_index}]}` → 201 with `{build_id, placement, priority, reason, mem_bytes, cpu_build_ms, gpu_total_ms, created:true}`. A repeat returns 200 with `created:false`; every field but `reason` is computed from the stored row, whatever the repeat's body says (invariant 6). 404 for an unknown round; 409 for a new build when the round already holds `n_shards` builds or has finished (a duplicate still gets its 200). `shard_id` is any non-negative integer; the scheduler does not assume shards are numbered densely. |
 | POST | `/builds/{id}/done` | shard | Local build finished. 409 unless the build is a running local build. |
-| POST | `/jobs/{round}/{shard}/{seq}/start`, `/done` | shard | Record follow-up job timing. 409 if the job is not in the right state. |
+| POST | `/jobs/{round}/{shard}/{seq}/start`, `/done` | shard | Record follow-up job timing. 404 if no such job, 409 if it exists but is not in the right state (start twice, done before start, done twice). |
 | GET | `/workers` | anyone | Live pool state and every registered worker |
 | GET | `/healthz` | Compose, Kubernetes | 200 when Postgres answers |
 
 Tests added: `costmodel` (range and monotonicity), `policy` (the four placement cases and determinism), `store` (`RoundFinishesOnlyWhenEveryShardIsDone`, which walks a two-shard round through every partial state and checks the round is stamped only at the end, with `finished_at` equal to the last job's finish), `api` (`EndToEndRoundOverHTTP`: a two-shard round over HTTP with a GPU build claimed and completed through the store, a local build forced by memory, duplicate submit, job events, 409s, and round completion; `ValidationAndNotFound`).
 
+### Cross-check of steps 1 and 2 (2026-10-02)
+
+An independent agent (`.claude/agents/crosscheck-tester.md`, Opus, fresh context) wrote 14 black-box tests in `scheduler/crosscheck/` from the spec alone, without reading the implementation. 13 passed. The one failure and the gaps it reported, with what was done:
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** A duplicate `POST /builds` returned `cpu_build_ms` and `gpu_total_ms` computed from the repeat's request body while `mem_bytes` came from the stored row. A shard retrying with a different body would sleep for the wrong time. | Fixed: all estimates on a duplicate come from the stored row. The cross-check test now passes. |
+| Which columns reap and release clear was unspecified; clearing `started_at` loses the first attempt's start. | Decision 24. |
+| `Renew` succeeds on an expired-but-unreaped lease. | Intended; decision 25. |
+| A failed GPU build leaves a `needs_index` job that can never start, so the round never finishes. | Open question below; fake builds cannot fail, so this is decided when real failures arrive (Phase 4). |
+| `shard_id` not validated against `n_shards`; submits to a finished round accepted. | Fixed with a per-round cap rather than an id range; decision 27. |
+| Job endpoints returned 409 for a nonexistent job. | Now 404; API table updated. |
+| "Fits" boundary, heartbeat capacity change, concurrent duplicate submits unspecified. | Decision 26. |
+| `reason` on a duplicate is not the original reason. | Not stored; the doc comment and API table now say so. |
+| Stale duplicate API table in this doc. | Removed. |
+
 Smoke test of the real binary: started before Postgres was ready (connect retry observed), migrated both files, answered `/healthz`, created a round, placed a build on the GPU queue with zero live workers (decision 19), and shut down cleanly on SIGTERM.
-
-### API
-
-_(to be written with the scheduler)_
-
-| Method | Path | Caller | Effect |
-| --- | --- | --- | --- |
-| POST | `/rounds` | shard simulator | Insert a round; returns `round_id` |
-| POST | `/builds` | shard | Run policy, insert build row, return placement. Idempotent on `build_id`. |
-| POST | `/builds/{id}/done` | shard | Mark a local build done |
-| POST | `/jobs/{round}/{shard}/{seq}/start` and `/done` | shard | Record follow-up job timing |
-| GET | `/rounds/{id}` | shard simulator | Per-shard build and job status; `finished_at` once all done |
 
 ## Open questions
 
+- **A failed GPU build and a waiting `needs_index` job.** `FinishCompleteRounds` treats `failed` as terminal, but the shard's job that needs the index can never start, so the round stays open forever. Resubmitting is a no-op by design. Candidates: the scheduler re-places a failed GPU build as local; or the shard marks dependent jobs skipped; or failed builds are retried once on the GPU. Decide in Phase 4, when the recall gate makes failure real. Raised by the cross-check.
 - Polling for build completion (decision 23) adds up to one poll interval per shard to the round. Revisit with long polling if Phase 3 measurements show it matters.
 
 - Should `failed` builds be retried automatically, or left for the shard to resubmit? Phase 1 leaves them; nothing fails in a fake build except a worker crash, which goes through reaping, not `failed`.

@@ -210,7 +210,7 @@ func TestValidationAndNotFound(t *testing.T) {
 		{"POST", "/builds", SubmitBuildRequest{RoundID: 999999, ShardID: 1, NVectors: 10, Dim: 4}, 404},
 		{"POST", "/builds", SubmitBuildRequest{RoundID: 1, ShardID: 1, NVectors: 0, Dim: 4}, 400},
 		{"POST", "/builds/nope/done", nil, 404},
-		{"POST", "/jobs/1/1/0/start", nil, 409},
+		{"POST", "/jobs/999999/1/0/start", nil, 404},
 		{"GET", "/healthz", nil, 200},
 	}
 	for _, c := range cases {
@@ -221,5 +221,50 @@ func TestValidationAndNotFound(t *testing.T) {
 		if got := h.call(c.method, c.path, body, nil); got != c.want {
 			t.Fatalf("%s %s: got %d want %d", c.method, c.path, got, c.want)
 		}
+	}
+}
+
+func TestSubmitValidationAgainstRound(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	var cr CreateRoundResponse
+	h.call("POST", "/rounds", CreateRoundRequest{Scenario: "test", Seed: 1, NShards: 2}, &cr)
+	r := cr.RoundID
+
+	t.Log("--- shard ids are the shard's own numbering; 7 and 42 are fine in a 2-shard round")
+	var first, dup SubmitBuildResponse
+	if code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 7, NVectors: 100_000, Dim: 128}, &first); code != 201 {
+		t.Fatalf("shard 7: got %d", code)
+	}
+	if code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 42, NVectors: 10, Dim: 4}, nil); code != 201 {
+		t.Fatalf("shard 42: got %d", code)
+	}
+
+	t.Log("--- a third distinct shard would let the round finish early: refused")
+	if code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 99, NVectors: 10, Dim: 4}, nil); code != 409 {
+		t.Fatalf("third shard in a 2-shard round: got %d want 409", code)
+	}
+
+	t.Log("--- a duplicate with a different body returns estimates for the STORED row, and is fine in a full round")
+	h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 7, NVectors: 5, Dim: 128}, &dup)
+	if dup.Created || dup.CPUBuildMs != first.CPUBuildMs || dup.GPUTotalMs != first.GPUTotalMs || dup.MemBytes != first.MemBytes {
+		t.Fatalf("duplicate estimates differ: first %+v dup %+v", first, dup)
+	}
+
+	t.Log("--- finish the round; a duplicate is still 200, a new build would be 409")
+	for range 2 {
+		c, ok, _ := h.st.Claim(ctx, "w", 1<<40, 30*time.Second)
+		if !ok {
+			t.Fatal("expected a claimable build")
+		}
+		h.st.Complete(ctx, c.BuildID, c.Attempt) //nolint:errcheck
+	}
+	var rs RoundStatus
+	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
+	if rs.Round.FinishedAt == nil {
+		t.Fatal("round should be finished")
+	}
+	if code := h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 42, NVectors: 10, Dim: 4}, nil); code != 200 {
+		t.Fatalf("duplicate into a finished round: got %d want 200", code)
 	}
 }

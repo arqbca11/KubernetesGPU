@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -151,9 +152,9 @@ type SubmitBuildResponse struct {
 	BuildID   string  `json:"build_id"`
 	Placement string  `json:"placement"`
 	Priority  float64 `json:"priority"`
-	Reason    string  `json:"reason"`
+	Reason    string  `json:"reason"` // the policy's one-line reason; on a duplicate, a note that the existing decision was returned (the original reason is not stored)
 	MemBytes  int64   `json:"mem_bytes"`
-	Created   bool    `json:"created"` // false: this build_id already existed; fields describe the existing row
+	Created   bool    `json:"created"` // false: this build_id already existed; every field but reason describes the existing row
 	// Cost model estimates, so the shard can sleep for the right time on a local build.
 	CPUBuildMs int64 `json:"cpu_build_ms"`
 	GPUTotalMs int64 `json:"gpu_total_ms"`
@@ -175,15 +176,28 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := r.Context()
-	if _, found, err := s.st.GetRound(ctx, req.RoundID); err != nil {
+	rd, found, err := s.st.GetRound(ctx, req.RoundID)
+	if err != nil {
 		s.internal(w, "get round", err)
 		return
-	} else if !found {
+	}
+	if !found {
 		writeError(w, http.StatusNotFound, "no such round")
 		return
 	}
-
 	buildID := store.BuildID(req.ShardID, req.RoundID)
+
+	// Invariant 6 first: a resubmit returns the existing decision, even if the
+	// round has since finished. Only a genuinely new build is refused below.
+	if existing, found, err := s.st.GetBuild(ctx, buildID); err != nil {
+		s.internal(w, "get build", err)
+		return
+	} else if found {
+		s.writeDuplicate(w, existing)
+		return
+	}
+	_ = rd // existence checked above; fullness and finish are enforced inside SubmitBuild under a row lock
+
 	mem := s.cm.GPUMemBytes(req.NVectors, req.Dim)
 	resp := SubmitBuildResponse{
 		BuildID:    buildID,
@@ -209,21 +223,23 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 		BuildID: buildID, RoundID: req.RoundID, ShardID: req.ShardID, NVectors: req.NVectors,
 		Dim: req.Dim, MemBytes: mem, Placement: dec.Placement, Priority: dec.Priority,
 	}, jobs)
+	if errors.Is(err, store.ErrRoundFull) || errors.Is(err, store.ErrRoundFinished) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.internal(w, "submit build", err)
 		return
 	}
 	if !inserted {
-		// Invariant 6: the row already exists; describe it and change nothing.
+		// Lost a race with a concurrent identical submit; ON CONFLICT DO NOTHING
+		// guarantees exactly one insert, so describe the winner's row.
 		existing, _, err := s.st.GetBuild(ctx, buildID)
 		if err != nil {
 			s.internal(w, "get build", err)
 			return
 		}
-		resp.Placement, resp.Priority, resp.MemBytes = existing.Placement, existing.Priority, existing.MemBytes
-		resp.Reason = "duplicate submit; existing decision returned"
-		s.log.Info("duplicate submit ignored", "build_id", buildID, "round_id", req.RoundID, "attempt", existing.Attempt, "placement", existing.Placement)
-		writeJSON(w, http.StatusOK, resp)
+		s.writeDuplicate(w, existing)
 		return
 	}
 	resp.Placement, resp.Priority, resp.Reason, resp.Created = dec.Placement, dec.Priority, dec.Reason, true
@@ -232,6 +248,24 @@ func (s *Server) submitBuild(w http.ResponseWriter, r *http.Request) {
 		"reason", dec.Reason, "n_vectors", req.NVectors, "dim", req.Dim, "mem_bytes", mem,
 		"live_workers", pool.LiveWorkers, "jobs", len(jobs))
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// writeDuplicate answers a resubmit: 200, created=false, and every estimate
+// computed from the stored row rather than the request body (which may
+// differ; cross-check finding, 2026-10-02).
+func (s *Server) writeDuplicate(w http.ResponseWriter, existing store.BuildRow) {
+	s.log.Info("duplicate submit ignored", "build_id", existing.BuildID, "round_id", existing.RoundID,
+		"attempt", existing.Attempt, "placement", existing.Placement)
+	writeJSON(w, http.StatusOK, SubmitBuildResponse{
+		BuildID:    existing.BuildID,
+		Placement:  existing.Placement,
+		Priority:   existing.Priority,
+		Reason:     "duplicate submit; existing decision returned",
+		MemBytes:   existing.MemBytes,
+		Created:    false,
+		CPUBuildMs: s.cm.CPUBuild(existing.NVectors, existing.Dim).Milliseconds(),
+		GPUTotalMs: s.cm.GPUTotal(existing.NVectors, existing.Dim).Milliseconds(),
+	})
 }
 
 func (s *Server) localBuildDone(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +323,16 @@ func (s *Server) jobEvent(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if !done {
-		writeError(w, http.StatusConflict, "no such job, or it is not in the right state to be "+what)
+		j, found, err := s.st.GetJob(r.Context(), round, shard, seq)
+		if err != nil {
+			s.internal(w, "get job", err)
+			return
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "no such job")
+			return
+		}
+		writeError(w, http.StatusConflict, fmt.Sprintf("job cannot be %s: started_at=%v finished_at=%v", what, j.StartedAt, j.FinishedAt))
 		return
 	}
 	s.log.Info("follow-up job "+what, "round_id", round, "shard_id", shard, "seq", seq,

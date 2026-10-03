@@ -109,7 +109,7 @@ func row(t *testing.T, pool *pgxpool.Pool, id string) {
 func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	low := submit(t, s, r, 1, "gpu", 1, 1<<20)
 	high := submit(t, s, r, 2, "gpu", 5, 1<<20)
 	mid := submit(t, s, r, 3, "gpu", 3, 1<<20)
@@ -142,7 +142,7 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	const n = 20
 	for i := range int32(n) {
 		if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(i, r), RoundID: r, ShardID: i,
@@ -191,7 +191,7 @@ func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 func TestFencingAfterReap(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	id := submit(t, s, r, 1, "gpu", 0, 1<<20)
 
 	c1, ok, _ := s.Claim(ctx, "worker-1", 1<<30, lease)
@@ -289,7 +289,7 @@ func TestFencingAfterReap(t *testing.T) {
 func TestReleaseReturnsToQueueAndFences(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	id := submit(t, s, r, 1, "gpu", 0, 1<<20)
 
 	c1, _, _ := s.Claim(ctx, "w1", 1<<30, lease)
@@ -316,7 +316,7 @@ func TestReleaseReturnsToQueueAndFences(t *testing.T) {
 func TestClaimRespectsWorkerMemory(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	big := submit(t, s, r, 1, "gpu", 10, 16<<30) // 16 GiB, high priority
 	small := submit(t, s, r, 2, "gpu", 0, 1<<30)
 
@@ -336,7 +336,7 @@ func TestClaimRespectsWorkerMemory(t *testing.T) {
 func TestDuplicateSubmitIsNoop(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	b := Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu", Priority: 7}
 	if ins, err := s.SubmitBuild(ctx, b, nil); err != nil || !ins {
 		t.Fatalf("first submit: %v %v", ins, err)
@@ -367,7 +367,7 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 func TestLocalBuildsAreNeverReaped(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
 	id := submit(t, s, r, 1, "local", 0, 1<<20)
 	if st, _ := state(t, pool, id); st != "running" {
 		t.Fatalf("local build state=%s, want running", st)

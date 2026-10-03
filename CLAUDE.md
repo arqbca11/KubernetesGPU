@@ -59,6 +59,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 - When a design question isn't answered here or in the roadmap, ask instead of picking silently.
 - Keep a **Commands** section below up to date as build, test and run commands are added.
 - Tests narrate what they do with `t.Logf` (what was done, what Postgres now holds, what was expected), so `test-logs/latest.log` reads as a record of what happened. Commit the refreshed log with the change that produced it.
+- After each step that adds behavior, run the `crosscheck-tester` agent (`.claude/agents/crosscheck-tester.md`): it writes black-box tests in `scheduler/crosscheck/` from the spec without reading the implementation. Triage its findings as bug, spec gap or test error; fix bugs, turn spec gaps into design-doc rows, and record the outcome in the design doc. Its tests are committed and run with the rest.
 - Keep the current phase's doc in `docs/design/` current: every design decision goes in its decisions table (append-only; a reversal is a new row pointing at the old one), and the implementation notes section is updated as components land. Diagrams are Mermaid.
 - **Explain Docker, Kubernetes and Go concepts as you go.** The owner has school-level knowledge of these and deep database knowledge. When you introduce a concept from any of the three (an image vs a container, a Compose service, a goroutine, a Go module, a Deployment, a probe, a taint) explain it in a sentence or two in your reply the first time it comes up. This applies to every agent and subagent working in this repo.
 - **Keep `docs/study-notes.md` up to date.** It is gitignored. Add a short entry for each concept you explained, grouped by topic, so the owner has one place to review. Don't repeat Postgres concepts; those are known.
@@ -72,7 +73,7 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | --- | --- |
 | Check toolchain | `go version && python3.12 --version && uv --version && psql --version && docker compose version` |
 | Compile and vet Go | `go build ./... && go vet ./...` |
-| Go tests (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh` (default `-v ./...`; extra args replace that, e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`). Writes a narrated log to `test-logs/latest.log` (tracked) and `test-logs/history/` (local). |
+| Go tests (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh` (default `-v ./...`; extra args replace that, e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`). Runs packages one at a time (`-p 1`) because they share the database. Writes a narrated log to `test-logs/latest.log` (tracked) and `test-logs/history/` (local). |
 | Go unit tests only, no database | `go test ./...` (database tests skip themselves when `TEST_DATABASE_URL` is unset) |
 
 | Run the scheduler locally | `DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/kgpu?sslmode=disable LOG_FORMAT=text go run ./scheduler/cmd/scheduler` (env vars documented at the top of `scheduler/cmd/scheduler/main.go`) |

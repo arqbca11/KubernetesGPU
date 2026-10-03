@@ -176,10 +176,21 @@ func (s *Store) ListBuilds(ctx context.Context, roundID int64) ([]BuildRow, erro
 	return out, rows.Err()
 }
 
+// ErrRoundFull is returned by SubmitBuild when the round already holds
+// n_shards builds and this would be a new one. Without this, an extra shard
+// could make the completion count match early.
+var ErrRoundFull = errors.New("round already has n_shards builds")
+
+// ErrRoundFinished is returned by SubmitBuild for a new build into a round
+// that has already finished. (A duplicate of an existing build is still a
+// no-op, not an error.)
+var ErrRoundFinished = errors.New("round is already finished")
+
 // SubmitBuild inserts a build and its follow-up jobs in one transaction. GPU
 // builds start queued; local builds start running. A build_id that already
 // exists leaves everything untouched and returns inserted=false (invariant
-// 6: resubmitting is a no-op).
+// 6: resubmitting is a no-op). The round row is locked for the transaction,
+// so concurrent submits into one round serialise and the n_shards cap holds.
 func (s *Store) SubmitBuild(ctx context.Context, b Build, jobs []JobSpec) (inserted bool, err error) {
 	var state string
 	switch b.Placement {
@@ -195,6 +206,29 @@ func (s *Store) SubmitBuild(ctx context.Context, b Build, jobs []JobSpec) (inser
 		return false, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	// Duplicate first: it must stay a no-op even when the round is full or finished.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM builds WHERE build_id = $1)`, b.BuildID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
+	}
+	var nShards, nBuilds int32
+	var finished *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT r.n_shards, r.finished_at, (SELECT COUNT(*) FROM builds WHERE round_id = r.round_id)
+		FROM rounds r WHERE r.round_id = $1 FOR UPDATE`, b.RoundID).Scan(&nShards, &finished, &nBuilds)
+	if err != nil {
+		return false, fmt.Errorf("submit %s: lock round: %w", b.BuildID, err)
+	}
+	if finished != nil {
+		return false, ErrRoundFinished
+	}
+	if nBuilds >= nShards {
+		return false, ErrRoundFull
+	}
 
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO builds
@@ -225,6 +259,9 @@ func (s *Store) SubmitBuild(ctx context.Context, b Build, jobs []JobSpec) (inser
 // leases it to workerID for lease. ok is false when the queue has nothing
 // claimable. attempt is incremented here and nowhere else.
 func (s *Store) Claim(ctx context.Context, workerID string, memCap int64, lease time.Duration) (c Claimed, ok bool, err error) {
+	if lease <= 0 {
+		return Claimed{}, false, fmt.Errorf("claim: lease must be positive, got %s", lease)
+	}
 	err = s.pool.QueryRow(ctx, `
 		UPDATE builds
 		SET state = 'leased',
@@ -251,7 +288,16 @@ func (s *Store) Claim(ctx context.Context, workerID string, memCap int64, lease 
 }
 
 // Renew extends the lease. false means the lease is lost: stop working.
+//
+// There is deliberately no lease_until > now() check. A worker that wakes
+// after its expiry but before the reaper has acted still owns the row (no
+// one else has claimed it), so letting it renew is safe and avoids throwing
+// away work. The lease is lost only when the reaper or another claimer has
+// acted, and attempt then no longer matches.
 func (s *Store) Renew(ctx context.Context, buildID string, attempt int32, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		return false, fmt.Errorf("renew %s: lease must be positive, got %s", buildID, lease)
+	}
 	return s.guarded(ctx, `
 		UPDATE builds
 		SET lease_until = now() + make_interval(secs => $3)
@@ -307,6 +353,10 @@ type Reaped struct {
 
 // Reap returns every expired lease to the queue and reports which ones.
 // Idempotent: a second call right after the first touches nothing.
+//
+// started_at means "when the current attempt started" and is cleared here
+// and by Release; enqueued_at keeps the submit time. Time lost to abandoned
+// attempts is therefore finished_at - enqueued_at minus the last attempt.
 func (s *Store) Reap(ctx context.Context) ([]Reaped, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE builds
@@ -361,6 +411,18 @@ func (s *Store) FinishJob(ctx context.Context, roundID int64, shardID, seq int32
 		WHERE round_id = $1 AND shard_id = $2 AND seq = $3
 		  AND started_at IS NOT NULL AND finished_at IS NULL`,
 		roundID, shardID, seq)
+}
+
+func (s *Store) GetJob(ctx context.Context, roundID int64, shardID, seq int32) (JobRow, bool, error) {
+	var j JobRow
+	err := s.pool.QueryRow(ctx, `
+		SELECT round_id, shard_id, seq, duration_ms, needs_index, started_at, finished_at
+		FROM shard_jobs WHERE round_id = $1 AND shard_id = $2 AND seq = $3`, roundID, shardID, seq).
+		Scan(&j.RoundID, &j.ShardID, &j.Seq, &j.DurationMs, &j.NeedsIndex, &j.StartedAt, &j.FinishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return JobRow{}, false, nil
+	}
+	return j, err == nil, err
 }
 
 func (s *Store) ListJobs(ctx context.Context, roundID int64) ([]JobRow, error) {

@@ -51,7 +51,7 @@ pgver=$(docker exec "$name" postgres --version)
   echo "commit:    $(git rev-parse --short HEAD) $(git diff --quiet || echo '(uncommitted changes)')"
   echo "go:        $(go version | cut -d' ' -f3)"
   echo "postgres:  $pgver (image $image, container $name, port $port)"
-  echo "args:      go test $*"
+  echo "args:      go test -p 1 $*"
   echo
   echo "Lines starting with 'store_test.go:N:' are the test narrating what it did."
   echo "Lines tagged [db] are the build row as Postgres had it at that moment."
@@ -60,7 +60,9 @@ pgver=$(docker exec "$name" postgres --version)
 
 export TEST_DATABASE_URL="postgres://postgres:test@127.0.0.1:${port}/kgpu?sslmode=disable"
 set +e
-go test "$@" 2>&1 | tee -a "$log"
+# -p 1: run one package at a time. Every package's tests share this one
+# database and TRUNCATE it, so packages must not overlap.
+go test -p 1 "$@" 2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 set -e
 if [ "$rc" -eq 0 ]; then result="PASS"; else result="FAIL (exit $rc)"; fi
