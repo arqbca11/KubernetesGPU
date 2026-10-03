@@ -1,5 +1,5 @@
-// Package store holds every statement that touches rounds, builds, follow-up
-// jobs and workers. The Python worker runs the same claim, renew, complete,
+// Package store holds every statement that touches rounds, builds, arriving
+// queries (shard_jobs), shard load reports (shard_status) and workers. The Python worker runs the same claim, renew, complete,
 // fail, release and heartbeat SQL (see worker/); this package is the Go side
 // and the reference the integration test checks.
 //
@@ -73,7 +73,9 @@ func (s *Store) FinishCompleteRounds(ctx context.Context) (int64, error) {
 		      (SELECT MAX(finished_at) FROM shard_jobs WHERE round_id = r.round_id))
 		WHERE r.finished_at IS NULL
 		  AND (SELECT COUNT(*) FROM builds b WHERE b.round_id = r.round_id) = r.n_shards
-		  AND (SELECT COUNT(*) FROM shard_status st WHERE st.round_id = r.round_id AND st.stream_done) = r.n_shards
+		  AND (SELECT COUNT(*) FROM shard_status st
+		       JOIN builds b ON b.round_id = st.round_id AND b.shard_id = st.shard_id
+		       WHERE st.round_id = r.round_id AND st.stream_done) = r.n_shards
 		  AND NOT EXISTS (SELECT 1 FROM builds b
 		                  WHERE b.round_id = r.round_id AND b.state NOT IN ('done', 'failed'))
 		  AND NOT EXISTS (SELECT 1 FROM shard_jobs j
@@ -210,16 +212,24 @@ func (s *Store) SubmitBuild(ctx context.Context, b Build) (inserted bool, err er
 	if exists {
 		return false, nil
 	}
-	var nShards, nBuilds int32
+	// Lock the round row, THEN count in a separate statement. Under READ
+	// COMMITTED a statement's snapshot is taken when it starts, before it
+	// blocks on the lock, so a COUNT inside the locking statement would not
+	// see the build inserted by the transaction we waited for. (Found by the
+	// cross-check, 2026-10-02.)
+	var nShards int32
 	var finished *time.Time
-	err = tx.QueryRow(ctx, `
-		SELECT r.n_shards, r.finished_at, (SELECT COUNT(*) FROM builds WHERE round_id = r.round_id)
-		FROM rounds r WHERE r.round_id = $1 FOR UPDATE`, b.RoundID).Scan(&nShards, &finished, &nBuilds)
+	err = tx.QueryRow(ctx, `SELECT n_shards, finished_at FROM rounds WHERE round_id = $1 FOR UPDATE`, b.RoundID).
+		Scan(&nShards, &finished)
 	if err != nil {
 		return false, fmt.Errorf("submit %s: lock round: %w", b.BuildID, err)
 	}
 	if finished != nil {
 		return false, ErrRoundFinished
+	}
+	var nBuilds int32
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM builds WHERE round_id = $1`, b.RoundID).Scan(&nBuilds); err != nil {
+		return false, err
 	}
 	if nBuilds >= nShards {
 		return false, ErrRoundFull
@@ -320,18 +330,20 @@ func (s *Store) Release(ctx context.Context, buildID string, attempt int32) (boo
 }
 
 // PreemptToGPU moves a running local build to the GPU queue (decision 31):
-// the shard's CPU progress is lost, its CPU is freed. attempt is untouched;
-// the first claim will bump it. false if the build is not a running local build.
+// the shard's CPU progress is lost, its CPU is freed. attempt and enqueued_at
+// are untouched (the first claim bumps attempt; enqueued_at keeps the submit
+// time for the timeline). false if the build is not a running local build.
 func (s *Store) PreemptToGPU(ctx context.Context, buildID string, priority float64) (bool, error) {
 	return s.guarded(ctx, `
 		UPDATE builds
-		SET placement = 'gpu', state = 'queued', priority = $2, started_at = NULL, enqueued_at = now()
+		SET placement = 'gpu', state = 'queued', priority = $2, started_at = NULL
 		WHERE build_id = $1 AND placement = 'local' AND state = 'running'`,
 		buildID, priority)
 }
 
 // RenegeToLocal moves a queued GPU build back to the shard's CPU (decision
-// 31). false if the build is not a queued GPU build (leased builds are never moved).
+// 31); started_at becomes now, since the local attempt starts now. false if
+// the build is not a queued GPU build (leased builds are never moved).
 func (s *Store) RenegeToLocal(ctx context.Context, buildID string) (bool, error) {
 	return s.guarded(ctx, `
 		UPDATE builds
@@ -389,7 +401,7 @@ func (s *Store) Reap(ctx context.Context) ([]Reaped, error) {
 	return out, rows.Err()
 }
 
-// ---- follow-up jobs -----------------------------------------------------
+// ---- queries (shard_jobs) ------------------------------------------------
 
 type JobRow struct {
 	RoundID    int64      `json:"round_id"`
@@ -402,10 +414,37 @@ type JobRow struct {
 	FinishedAt *time.Time `json:"finished_at"`
 }
 
+// ErrStreamDone is returned for an arrival at a shard that has already
+// reported its stream exhausted.
+var ErrStreamDone = errors.New("this shard has already reported stream_done")
+
 // RecordArrival records a query arriving at a shard (decision 28). seq is
 // the shard's own arrival counter. A repeat of the same seq is a no-op and
-// returns inserted=false.
+// returns inserted=false. ErrNoBuild if the shard has no build in the round;
+// ErrStreamDone if the shard already reported its stream exhausted.
 func (s *Store) RecordArrival(ctx context.Context, roundID int64, shardID, seq int32, durationMs int64, needsIndex bool) (inserted bool, err error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM shard_jobs WHERE round_id = $1 AND shard_id = $2 AND seq = $3)`,
+		roundID, shardID, seq).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
+	}
+	var hasBuild, streamDone bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM builds WHERE round_id = $1 AND shard_id = $2),
+		       COALESCE((SELECT stream_done FROM shard_status WHERE round_id = $1 AND shard_id = $2), false)`,
+		roundID, shardID).Scan(&hasBuild, &streamDone); err != nil {
+		return false, err
+	}
+	if !hasBuild {
+		return false, ErrNoBuild
+	}
+	if streamDone {
+		return false, ErrStreamDone
+	}
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO shard_jobs (round_id, shard_id, seq, duration_ms, needs_index)
 		VALUES ($1, $2, $3, $4, $5)
@@ -416,7 +455,7 @@ func (s *Store) RecordArrival(ctx context.Context, roundID int64, shardID, seq i
 	return tag.RowsAffected() == 1, nil
 }
 
-// StartJob records that a follow-up job began. false if no such job or
+// StartJob records that a query began running. false if no such query or
 // already started.
 func (s *Store) StartJob(ctx context.Context, roundID int64, shardID, seq int32) (bool, error) {
 	return s.guarded(ctx, `
@@ -425,8 +464,8 @@ func (s *Store) StartJob(ctx context.Context, roundID int64, shardID, seq int32)
 		roundID, shardID, seq)
 }
 
-// FinishJob records that a started follow-up job ended. false if no such
-// job, not started, or already finished.
+// FinishJob records that a running query finished. false if no such query,
+// not started, or already finished.
 func (s *Store) FinishJob(ctx context.Context, roundID int64, shardID, seq int32) (bool, error) {
 	return s.guarded(ctx, `
 		UPDATE shard_jobs SET finished_at = now()
@@ -481,21 +520,45 @@ type ShardStatus struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
-// ReportStatus upserts a shard's latest report.
+// ErrNoBuild is returned when a report or arrival names a shard that has no
+// build in the round. Only shards that submitted take part in a round.
+var ErrNoBuild = errors.New("this shard has no build in this round")
+
+// ReportStatus upserts a shard's latest report. stream_done is sticky: once
+// a shard has said its stream is exhausted, a later report cannot unsay it.
 func (s *Store) ReportStatus(ctx context.Context, st ShardStatus) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO shard_status
 		  (round_id, shard_id, queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		SELECT $1, $2, $3, $4, $5, $6, $7, now()
+		WHERE EXISTS (SELECT 1 FROM builds WHERE round_id = $1 AND shard_id = $2)
 		ON CONFLICT (round_id, shard_id) DO UPDATE SET
 		  queue_depth = EXCLUDED.queue_depth,
 		  waiting_needs_index = EXCLUDED.waiting_needs_index,
 		  oldest_wait_ms = EXCLUDED.oldest_wait_ms,
 		  build_progress = EXCLUDED.build_progress,
-		  stream_done = EXCLUDED.stream_done,
+		  stream_done = shard_status.stream_done OR EXCLUDED.stream_done,
 		  updated_at = now()`,
 		st.RoundID, st.ShardID, st.QueueDepth, st.WaitingNeedsIndex, st.OldestWaitMs, st.BuildProgress, st.StreamDone)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoBuild
+	}
+	return nil
+}
+
+func (s *Store) GetShardStatus(ctx context.Context, roundID int64, shardID int32) (ShardStatus, bool, error) {
+	var st ShardStatus
+	err := s.pool.QueryRow(ctx, `
+		SELECT round_id, shard_id, queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done, updated_at
+		FROM shard_status WHERE round_id = $1 AND shard_id = $2`, roundID, shardID).
+		Scan(&st.RoundID, &st.ShardID, &st.QueueDepth, &st.WaitingNeedsIndex, &st.OldestWaitMs, &st.BuildProgress, &st.StreamDone, &st.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ShardStatus{}, false, nil
+	}
+	return st, err == nil, err
 }
 
 func (s *Store) ListShardStatus(ctx context.Context, roundID int64) ([]ShardStatus, error) {

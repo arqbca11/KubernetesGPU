@@ -306,6 +306,14 @@ func (s *Server) jobArrived(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inserted, err := s.st.RecordArrival(r.Context(), round, shard, req.Seq, req.DurationMs, req.NeedsIndex)
+	if errors.Is(err, store.ErrNoBuild) {
+		writeError(w, http.StatusNotFound, err.Error()+"; submit first")
+		return
+	}
+	if errors.Is(err, store.ErrStreamDone) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.internal(w, "record arrival", err)
 		return
@@ -368,10 +376,15 @@ func (s *Server) shardReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "this shard has no build in this round; submit first")
 		return
 	}
-	if err := s.st.ReportStatus(ctx, store.ShardStatus{
+	err = s.st.ReportStatus(ctx, store.ShardStatus{
 		RoundID: round, ShardID: shard, QueueDepth: req.QueueDepth, WaitingNeedsIndex: req.WaitingNeedsIndex,
 		OldestWaitMs: req.OldestWaitMs, BuildProgress: req.BuildProgress, StreamDone: req.StreamDone,
-	}); err != nil {
+	})
+	if errors.Is(err, store.ErrNoBuild) {
+		writeError(w, http.StatusNotFound, err.Error()+"; submit first")
+		return
+	}
+	if err != nil {
 		s.internal(w, "report status", err)
 		return
 	}
@@ -447,7 +460,7 @@ func (s *Server) jobEvent(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusConflict, fmt.Sprintf("job cannot be %s: started_at=%v finished_at=%v", what, j.StartedAt, j.FinishedAt))
 		return
 	}
-	s.log.Info("follow-up job "+what, "round_id", round, "shard_id", shard, "seq", seq,
+	s.log.Info("query "+what, "round_id", round, "shard_id", shard, "seq", seq,
 		"build_id", store.BuildID(shard, round))
 	writeJSON(w, http.StatusOK, map[string]any{"round_id": round, "shard_id": shard, "seq": seq, "event": what})
 }
