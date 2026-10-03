@@ -75,4 +75,7 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | Go tests (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh` (default `-v ./...`; extra args replace that, e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`). Writes a narrated log to `test-logs/latest.log` (tracked) and `test-logs/history/` (local). |
 | Go unit tests only, no database | `go test ./...` (database tests skip themselves when `TEST_DATABASE_URL` is unset) |
 
+| Run the scheduler locally | `DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/kgpu?sslmode=disable LOG_FORMAT=text go run ./scheduler/cmd/scheduler` (env vars documented at the top of `scheduler/cmd/scheduler/main.go`) |
+| Build the scheduler image | `docker build -f scheduler/Dockerfile -t kgpu-scheduler .` (context is the repo root) |
+
 The Go module is `github.com/arqbca11/KubernetesGPU`, one module at the repo root covering `db/`, `scheduler/`, `shard/` and the Go parts of `experiments/`.

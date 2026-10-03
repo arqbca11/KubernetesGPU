@@ -1,0 +1,7 @@
+.git
+.obsidian
+docs
+test-logs
+node_modules
+**/.venv
+**/__pycache__

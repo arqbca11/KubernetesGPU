@@ -32,7 +32,7 @@ func newStore(t *testing.T) (*Store, *pgxpool.Pool) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE builds, shard_jobs, rounds, workers`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE shard_jobs, builds, rounds, workers`); err != nil {
 		t.Fatal(err)
 	}
 	return New(pool), pool
@@ -44,7 +44,7 @@ func submit(t *testing.T, s *Store, round int64, shard int32, placement string, 
 	ins, err := s.SubmitBuild(context.Background(), Build{
 		BuildID: id, RoundID: round, ShardID: shard, NVectors: 1000, Dim: 128,
 		MemBytes: mem, Placement: placement, Priority: priority,
-	})
+	}, nil)
 	if err != nil || !ins {
 		t.Fatalf("submit %s: inserted=%v err=%v", id, ins, err)
 	}
@@ -59,6 +59,19 @@ func state(t *testing.T, pool *pgxpool.Pool, id string) (st string, attempt int3
 		t.Fatal(err)
 	}
 	return
+}
+
+// reap runs the reaper and returns how many leases it returned to the queue.
+func reap(t *testing.T, s *Store) int {
+	t.Helper()
+	r, err := s.Reap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range r {
+		t.Logf("  [reaper] build %s attempt %d (was leased to %s) -> queued", x.BuildID, x.Attempt, x.LeaseOwner)
+	}
+	return len(r)
 }
 
 func expireLease(t *testing.T, pool *pgxpool.Pool, id string) {
@@ -96,7 +109,7 @@ func row(t *testing.T, pool *pgxpool.Pool, id string) {
 func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	low := submit(t, s, r, 1, "gpu", 1, 1<<20)
 	high := submit(t, s, r, 2, "gpu", 5, 1<<20)
 	mid := submit(t, s, r, 3, "gpu", 3, 1<<20)
@@ -129,11 +142,11 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	const n = 20
 	for i := range int32(n) {
 		if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(i, r), RoundID: r, ShardID: i,
-			NVectors: 1000, Dim: 128, MemBytes: 1 << 20, Placement: "gpu"}); err != nil {
+			NVectors: 1000, Dim: 128, MemBytes: 1 << 20, Placement: "gpu"}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -178,7 +191,7 @@ func TestConcurrentClaimsNeverShareABuild(t *testing.T) {
 func TestFencingAfterReap(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	id := submit(t, s, r, 1, "gpu", 0, 1<<20)
 
 	c1, ok, _ := s.Claim(ctx, "worker-1", 1<<30, lease)
@@ -189,7 +202,7 @@ func TestFencingAfterReap(t *testing.T) {
 	row(t, pool, id)
 
 	// Lease still live: nothing to reap.
-	n, _ := s.Reap(ctx)
+	n := reap(t, s)
 	if n != 0 {
 		t.Fatalf("reaped %d live leases", n)
 	}
@@ -199,7 +212,7 @@ func TestFencingAfterReap(t *testing.T) {
 	t.Log("worker-1 stops renewing (kill -9, or SIGSTOP)")
 	expireLease(t, pool, id)
 	row(t, pool, id)
-	n, _ = s.Reap(ctx)
+	n = reap(t, s)
 	if n != 1 {
 		t.Fatalf("reap: got %d want 1", n)
 	}
@@ -209,7 +222,7 @@ func TestFencingAfterReap(t *testing.T) {
 	}
 	row(t, pool, id)
 	// Reaper is idempotent.
-	n, _ = s.Reap(ctx)
+	n = reap(t, s)
 	if n != 0 {
 		t.Fatalf("second reap changed %d rows", n)
 	}
@@ -265,7 +278,7 @@ func TestFencingAfterReap(t *testing.T) {
 		t.Fatal("second complete succeeded")
 	}
 	t.Log("worker-2 completes again       -> rejected (already done)")
-	n, _ = s.Reap(ctx)
+	n = reap(t, s)
 	if n != 0 {
 		t.Fatalf("reap touched a done build")
 	}
@@ -276,7 +289,7 @@ func TestFencingAfterReap(t *testing.T) {
 func TestReleaseReturnsToQueueAndFences(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	id := submit(t, s, r, 1, "gpu", 0, 1<<20)
 
 	c1, _, _ := s.Claim(ctx, "w1", 1<<30, lease)
@@ -303,7 +316,7 @@ func TestReleaseReturnsToQueueAndFences(t *testing.T) {
 func TestClaimRespectsWorkerMemory(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	big := submit(t, s, r, 1, "gpu", 10, 16<<30) // 16 GiB, high priority
 	small := submit(t, s, r, 2, "gpu", 0, 1<<30)
 
@@ -323,9 +336,9 @@ func TestClaimRespectsWorkerMemory(t *testing.T) {
 func TestDuplicateSubmitIsNoop(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	b := Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu", Priority: 7}
-	if ins, err := s.SubmitBuild(ctx, b); err != nil || !ins {
+	if ins, err := s.SubmitBuild(ctx, b, nil); err != nil || !ins {
 		t.Fatalf("first submit: %v %v", ins, err)
 	}
 	t.Logf("submitted %s as gpu, priority 7", b.BuildID)
@@ -335,7 +348,7 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 
 	b.Priority = 99
 	b.Placement = "local"
-	ins, err := s.SubmitBuild(ctx, b)
+	ins, err := s.SubmitBuild(ctx, b, nil)
 	if err != nil || ins {
 		t.Fatalf("second submit: inserted=%v err=%v", ins, err)
 	}
@@ -354,7 +367,7 @@ func TestDuplicateSubmitIsNoop(t *testing.T) {
 func TestLocalBuildsAreNeverReaped(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	r, _ := s.CreateRound(ctx, "test", 1)
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
 	id := submit(t, s, r, 1, "local", 0, 1<<20)
 	if st, _ := state(t, pool, id); st != "running" {
 		t.Fatalf("local build state=%s, want running", st)
@@ -364,7 +377,7 @@ func TestLocalBuildsAreNeverReaped(t *testing.T) {
 		t.Fatal("a worker claimed a local build")
 	}
 	t.Log("a worker tries to claim -> nothing (local builds are not in the queue)")
-	n, _ := s.Reap(ctx)
+	n := reap(t, s)
 	if n != 0 {
 		t.Fatalf("reap touched a local build")
 	}
@@ -380,29 +393,103 @@ func TestLocalBuildsAreNeverReaped(t *testing.T) {
 	row(t, pool, id)
 }
 
-func TestHeartbeatAndLargestLiveWorker(t *testing.T) {
+func TestHeartbeatAndPoolState(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
-	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 0 {
-		t.Fatalf("no workers, got %d", m)
+	p, _ := s.Pool(ctx, time.Minute)
+	if p.LiveWorkers != 0 || p.LargestMem != 0 {
+		t.Fatalf("no workers, got %+v", p)
 	}
-	t.Log("no workers registered -> largest live memory is 0")
+	t.Log("no workers registered -> pool is empty")
 	s.Heartbeat(ctx, "a", 8<<30)  //nolint:errcheck
 	s.Heartbeat(ctx, "b", 24<<30) //nolint:errcheck
 	t.Log("workers a (8 GiB) and b (24 GiB) heartbeat")
-	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 24<<30 {
-		t.Fatalf("largest live = %d", m)
+	p, _ = s.Pool(ctx, time.Minute)
+	if p.LiveWorkers != 2 || p.LargestMem != 24<<30 {
+		t.Fatalf("pool = %+v", p)
 	}
-	t.Log("largest live memory within 1 minute -> 24 GiB")
+	t.Logf("pool within 1 minute -> %d live, largest 24 GiB", p.LiveWorkers)
 	// b goes stale.
 	pool.Exec(ctx, `UPDATE workers SET last_seen = now() - interval '10 minutes' WHERE worker_id = 'b'`) //nolint:errcheck
 	t.Log("  (test) b's last_seen pushed 10 minutes into the past, as if it had died")
-	if m, _ := s.LargestLiveWorkerMem(ctx, time.Minute); m != 8<<30 {
-		t.Fatalf("largest live after b stale = %d", m)
+	p, _ = s.Pool(ctx, time.Minute)
+	if p.LiveWorkers != 1 || p.LargestMem != 8<<30 {
+		t.Fatalf("pool after b stale = %+v", p)
 	}
-	t.Log("largest live memory within 1 minute -> 8 GiB (b no longer counts)")
+	t.Logf("pool within 1 minute -> %d live, largest 8 GiB (b no longer counts)", p.LiveWorkers)
 	// Heartbeat is an upsert.
 	if err := s.Heartbeat(ctx, "a", 8<<30); err != nil {
 		t.Fatal(err)
+	}
+	ws, _ := s.ListWorkers(ctx)
+	if len(ws) != 2 {
+		t.Fatalf("ListWorkers = %d rows", len(ws))
+	}
+}
+
+func TestRoundFinishesOnlyWhenEveryShardIsDone(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	r, _ := s.CreateRound(ctx, "test", 1, 2)
+	t.Log("round expects 2 shards")
+	jobs := []JobSpec{{Seq: 0, DurationMs: 100, NeedsIndex: false}, {Seq: 1, DurationMs: 100, NeedsIndex: true}}
+	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu"}, jobs); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("shard 1 submits a gpu build with 2 follow-up jobs")
+
+	finish := func(label string) int64 {
+		n, err := s.FinishCompleteRounds(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd, _, _ := s.GetRound(ctx, r)
+		done := "open"
+		if rd.FinishedAt != nil {
+			done = "finished"
+		}
+		t.Logf("%-55s -> rounds stamped: %d, round is %s", label, n, done)
+		return n
+	}
+	finish("nothing done yet")
+	c, _, _ := s.Claim(ctx, "w", 1<<30, lease)
+	s.Complete(ctx, c.BuildID, c.Attempt) //nolint:errcheck
+	s.StartJob(ctx, r, 1, 0)              //nolint:errcheck
+	s.FinishJob(ctx, r, 1, 0)             //nolint:errcheck
+	s.StartJob(ctx, r, 1, 1)              //nolint:errcheck
+	s.FinishJob(ctx, r, 1, 1)             //nolint:errcheck
+	if n := finish("shard 1 build done and both jobs finished, shard 2 absent"); n != 0 {
+		t.Fatal("round finished before shard 2 even submitted")
+	}
+	if _, err := s.SubmitBuild(ctx, Build{BuildID: BuildID(2, r), RoundID: r, ShardID: 2, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "local"}, jobs[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if n := finish("shard 2 submits a local build with 1 job, still running"); n != 0 {
+		t.Fatal("round finished with a running build")
+	}
+	s.CompleteLocal(ctx, BuildID(2, r)) //nolint:errcheck
+	s.StartJob(ctx, r, 2, 0)            //nolint:errcheck
+	if n := finish("shard 2 build done, its job started but not finished"); n != 0 {
+		t.Fatal("round finished with an unfinished job")
+	}
+	s.FinishJob(ctx, r, 2, 0) //nolint:errcheck
+	if n := finish("shard 2 job finished"); n != 1 {
+		t.Fatal("round did not finish")
+	}
+	if n := finish("run again"); n != 0 {
+		t.Fatal("finish is not idempotent")
+	}
+	// finished_at is the last build/job finish, not the time of the check.
+	var ok bool
+	pool.QueryRow(ctx, `
+		SELECT r.finished_at = (SELECT MAX(finished_at) FROM shard_jobs WHERE round_id = r.round_id)
+		FROM rounds r WHERE round_id = $1`, r).Scan(&ok) //nolint:errcheck
+	if !ok {
+		t.Fatal("round finished_at is not the last job's finished_at")
+	}
+	t.Log("round finished_at equals the last job's finished_at, not the reaper tick")
+	// A job cannot finish before it starts.
+	if ok, _ := s.FinishJob(ctx, r, 1, 1); ok {
+		t.Fatal("finished an already-finished job")
 	}
 }

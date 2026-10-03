@@ -94,6 +94,7 @@ CREATE TABLE rounds (
   round_id     bigint PRIMARY KEY,
   scenario     text NOT NULL,
   seed         bigint NOT NULL,
+  n_shards     int NOT NULL,            -- how many shards must report before the round is complete
   started_at   timestamptz NOT NULL DEFAULT now(),
   finished_at  timestamptz
 );
@@ -166,9 +167,9 @@ RETURNING build_id, attempt, n_vectors, dim;
 ### Steps
 
 - [x] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
-- [ ] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
+- [x] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), report follow-up job completion, read round status
 - [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
-- [ ] Reaper in the scheduler
+- [x] Reaper in the scheduler
 - [ ] Shard simulator: one binary running N shards as goroutines, each with a sequential CPU queue that applies the blocking rules from the assumptions above
 - [ ] Seeded workload generator with the scenario knobs: size distribution, follow-up profile, arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
 - [ ] Docker Compose: Postgres, scheduler, shard simulator, 2 workers. 6 shards by default.
