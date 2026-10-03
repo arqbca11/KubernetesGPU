@@ -74,7 +74,12 @@ sequenceDiagram
     end
 
     W->>P: complete: UPDATE state=done WHERE build_id AND attempt
-    Note over S: Follow-up jobs with needs_index=true<br/>may start once the shard sees state=done.
+    loop while a needs_index job is waiting (poll interval, default 500 ms)
+        S->>A: GET /builds/k:r
+        A->>P: SELECT state
+        A-->>S: state
+    end
+    Note over S: state=done: the needs_index job starts.
     S->>A: GET /rounds/r
     A->>P: SELECT builds, shard_jobs for round r
 ```
@@ -182,6 +187,7 @@ Offloading lets jobs 1 and 2 overlap the build. Job 3 waits for whichever is lat
 | 20 | Cost model v0 lives in `scheduler/costmodel` as pure functions of `n_vectors` and `dim`, with every constant overridable by env; the submit response returns the CPU and GPU estimates | Hard-code sleep times in the worker and shard | One source for the numbers the scheduler, shard and worker all need. The shard sleeps for `cpu_build_ms` on a local build; the Python worker reimplements the same formulas and must stay in step. |
 | 21 | Standard-library HTTP only: `net/http` with Go 1.22 method-and-pattern routing, `encoding/json`, `log/slog` | A router or web framework | Eight routes do not justify a dependency. `DisallowUnknownFields` on request bodies catches client typos early. |
 | 22 | Scheduler image is a two-stage build onto `distroless/static`, running as non-root | Alpine or Debian runtime image | The binary is static; distroless has no shell or package manager, so the attack surface and image size are minimal. Health checks therefore go through the HTTP endpoint, not a shell command. |
+| 23 | A shard learns that its GPU build is done by polling `GET /builds/{id}` at a configurable interval, only while it has a `needs_index` job waiting and nothing else to run | Worker notifies the shard; scheduler pushes to the shard; long polling backed by `LISTEN/NOTIFY` | Workers talk only to Postgres, and the scheduler learns of GPU completions only from Postgres, so the shard asking is the only path that adds no new state or address book. The shard is blocked anyway, so polling costs it nothing. Added latency is at most one interval per shard and is recorded in the timeline so it is visible. OpenSearch's data nodes poll their remote build service the same way. Long polling is the upgrade if Phase 3 shows the artifact matters; the endpoint is shaped so the shard logic does not change. Chosen by the owner on 2026-10-02. |
 
 ## Implementation notes
 
@@ -252,6 +258,8 @@ _(to be written with the scheduler)_
 | GET | `/rounds/{id}` | shard simulator | Per-shard build and job status; `finished_at` once all done |
 
 ## Open questions
+
+- Polling for build completion (decision 23) adds up to one poll interval per shard to the round. Revisit with long polling if Phase 3 measurements show it matters.
 
 - Should `failed` builds be retried automatically, or left for the shard to resubmit? Phase 1 leaves them; nothing fails in a fake build except a worker crash, which goes through reaping, not `failed`.
 - Lease length and renew interval (30 s / 10 s) are placeholders. Phase 2's SIGTERM handling and Phase 5's preemption measurements will inform them.
