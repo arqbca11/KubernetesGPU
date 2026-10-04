@@ -120,8 +120,9 @@ CREATE TABLE builds (
 );
 CREATE INDEX builds_queue ON builds (priority DESC, enqueued_at)
   WHERE state = 'queued' AND placement = 'gpu';
+ALTER TABLE builds ADD UNIQUE (round_id, shard_id);   -- one build per shard per round, as a key not a string convention
 
-CREATE TABLE shard_jobs (                -- one row per query, written on arrival
+CREATE TABLE shard_jobs (                -- one row per query, written on arrival; FK (round_id, shard_id) -> builds
   round_id     bigint NOT NULL REFERENCES rounds,
   shard_id     int NOT NULL,
   seq          int NOT NULL,            -- arrival order within the shard
@@ -133,7 +134,7 @@ CREATE TABLE shard_jobs (                -- one row per query, written on arriva
   PRIMARY KEY (round_id, shard_id, seq)
 );
 
-CREATE TABLE shard_status (              -- the shard's latest report; the scheduler's only view of its load
+CREATE TABLE shard_status (              -- the shard's latest report; FK (round_id, shard_id) -> builds
   round_id             bigint NOT NULL REFERENCES rounds,
   shard_id             int NOT NULL,
   queue_depth          int NOT NULL,     -- queries waiting (any kind)

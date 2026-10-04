@@ -17,8 +17,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// isForeignKeyViolation reports a Postgres SQLSTATE 23503. Since migration
+// 0004, shard_status and shard_jobs reference builds (round_id, shard_id),
+// so a write for a shard with no build fails here rather than in Go.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -432,15 +441,11 @@ func (s *Store) RecordArrival(ctx context.Context, roundID int64, shardID, seq i
 	if exists {
 		return false, nil
 	}
-	var hasBuild, streamDone bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM builds WHERE round_id = $1 AND shard_id = $2),
-		       COALESCE((SELECT stream_done FROM shard_status WHERE round_id = $1 AND shard_id = $2), false)`,
-		roundID, shardID).Scan(&hasBuild, &streamDone); err != nil {
+	var streamDone bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT stream_done FROM shard_status WHERE round_id = $1 AND shard_id = $2), false)`,
+		roundID, shardID).Scan(&streamDone); err != nil {
 		return false, err
-	}
-	if !hasBuild {
-		return false, ErrNoBuild
 	}
 	if streamDone {
 		return false, ErrStreamDone
@@ -449,6 +454,9 @@ func (s *Store) RecordArrival(ctx context.Context, roundID int64, shardID, seq i
 		INSERT INTO shard_jobs (round_id, shard_id, seq, duration_ms, needs_index)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT DO NOTHING`, roundID, shardID, seq, durationMs, needsIndex)
+	if isForeignKeyViolation(err) {
+		return false, ErrNoBuild // the shard has no build in this round
+	}
 	if err != nil {
 		return false, err
 	}
@@ -521,17 +529,18 @@ type ShardStatus struct {
 }
 
 // ErrNoBuild is returned when a report or arrival names a shard that has no
-// build in the round. Only shards that submitted take part in a round.
+// build in the round. Only shards that submitted take part in a round
+// (decision 33); the foreign keys from migration 0004 enforce it.
 var ErrNoBuild = errors.New("this shard has no build in this round")
 
 // ReportStatus upserts a shard's latest report. stream_done is sticky: once
 // a shard has said its stream is exhausted, a later report cannot unsay it.
+// ErrNoBuild if the shard has no build in the round (foreign key).
 func (s *Store) ReportStatus(ctx context.Context, st ShardStatus) error {
-	tag, err := s.pool.Exec(ctx, `
+	_, err := s.pool.Exec(ctx, `
 		INSERT INTO shard_status
 		  (round_id, shard_id, queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done, updated_at)
-		SELECT $1, $2, $3, $4, $5, $6, $7, now()
-		WHERE EXISTS (SELECT 1 FROM builds WHERE round_id = $1 AND shard_id = $2)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
 		ON CONFLICT (round_id, shard_id) DO UPDATE SET
 		  queue_depth = EXCLUDED.queue_depth,
 		  waiting_needs_index = EXCLUDED.waiting_needs_index,
@@ -540,13 +549,10 @@ func (s *Store) ReportStatus(ctx context.Context, st ShardStatus) error {
 		  stream_done = shard_status.stream_done OR EXCLUDED.stream_done,
 		  updated_at = now()`,
 		st.RoundID, st.ShardID, st.QueueDepth, st.WaitingNeedsIndex, st.OldestWaitMs, st.BuildProgress, st.StreamDone)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
+	if isForeignKeyViolation(err) {
 		return ErrNoBuild
 	}
-	return nil
+	return err
 }
 
 func (s *Store) GetShardStatus(ctx context.Context, roundID int64, shardID int32) (ShardStatus, bool, error) {

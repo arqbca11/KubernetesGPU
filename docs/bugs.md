@@ -66,7 +66,7 @@ Both halves are necessary. Lock without a fresh count is this bug. A fresh count
 
 **Cause.** The completion rule counted `shard_status` rows with `stream_done` and compared the count to `n_shards`. Nothing tied those rows to shards that had actually submitted builds. The HTTP report handler refused a report for a shard with no build, so no real client could produce the state, but the store method underneath did no such check, and the store is a public surface used by tests, the reaper, and the future reconsider loop. A guard that exists in one caller is not an invariant.
 
-**Fix.** Two layers. The completion query joins `shard_status` to `builds` on `(round_id, shard_id)`, so only shards with a build count. And `ReportStatus` and `RecordArrival` refuse writes for a shard with no build (`ErrNoBuild`, 404 over HTTP). A third layer, foreign keys from `shard_status` and `shard_jobs` to a new `UNIQUE (round_id, shard_id)` on `builds`, is proposed as migration 0004.
+**Fix.** Three layers. The completion query joins `shard_status` to `builds` on `(round_id, shard_id)`, so only shards with a build count. `ReportStatus` and `RecordArrival` return `ErrNoBuild` (404 over HTTP) for a shard with no build. And, the next day, migration 0004 added `UNIQUE (round_id, shard_id)` on `builds` with foreign keys from `shard_status` and `shard_jobs` to it, so the orphan row cannot exist no matter who writes it; the store now gets that error from Postgres (SQLSTATE 23503) rather than checking first.
 
 **Lesson.** Enforce a rule where every caller passes through, or in the schema, not in the one handler that happens to exist today.
 

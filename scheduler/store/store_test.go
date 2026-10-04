@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -550,4 +551,44 @@ func TestPreemptAndRenegeTransitions(t *testing.T) {
 		t.Fatal("reneged a leased build")
 	}
 	t.Logf("renege on a leased build -> rejected; attempt is %d, bumped by the claim, untouched by the moves", c.Attempt)
+}
+
+func TestSchemaRefusesOrphanShardRows(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	r, _ := s.CreateRound(ctx, "test", 1, 2)
+	submit(t, s, r, 1, "gpu", 0, 1<<20)
+	t.Log("decision 33 / migration 0004: shard_status and shard_jobs reference builds (round_id, shard_id)")
+
+	// Straight at Postgres, bypassing the store: the constraint must hold on its own.
+	_, err := pool.Exec(ctx, `INSERT INTO shard_status (round_id, shard_id, queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done)
+	                          VALUES ($1, 99, 0, 0, 0, 0, true)`, r)
+	t.Logf("raw INSERT into shard_status for shard 99 (no build) -> %v", err)
+	if !isForeignKeyViolation(err) {
+		t.Fatalf("expected a foreign key violation, got %v", err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO shard_jobs (round_id, shard_id, seq, duration_ms, needs_index) VALUES ($1, 99, 0, 10, false)`, r)
+	t.Logf("raw INSERT into shard_jobs for shard 99 (no build)   -> %v", err)
+	if !isForeignKeyViolation(err) {
+		t.Fatalf("expected a foreign key violation, got %v", err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO builds (build_id, round_id, shard_id, n_vectors, dim, mem_bytes, placement, state)
+	                         VALUES ('bogus', $1, 1, 10, 4, 1, 'gpu', 'queued')`, r)
+	t.Logf("raw INSERT of a second build for shard 1 in the round -> %v", err)
+	if err == nil {
+		t.Fatal("expected the unique (round_id, shard_id) constraint to refuse")
+	}
+
+	// Through the store, the same facts come back as the sentinel errors.
+	if err := s.ReportStatus(ctx, ShardStatus{RoundID: r, ShardID: 99}); !errors.Is(err, ErrNoBuild) {
+		t.Fatalf("ReportStatus for a buildless shard: got %v, want ErrNoBuild", err)
+	}
+	if _, err := s.RecordArrival(ctx, r, 99, 0, 10, false); !errors.Is(err, ErrNoBuild) {
+		t.Fatalf("RecordArrival for a buildless shard: got %v, want ErrNoBuild", err)
+	}
+	t.Log("ReportStatus and RecordArrival for shard 99 -> ErrNoBuild (mapped from SQLSTATE 23503)")
+	if err := s.ReportStatus(ctx, ShardStatus{RoundID: r, ShardID: 1}); err != nil {
+		t.Fatalf("ReportStatus for a real shard: %v", err)
+	}
+	t.Log("ReportStatus for shard 1 (has a build) -> ok")
 }
