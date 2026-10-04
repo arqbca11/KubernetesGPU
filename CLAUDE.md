@@ -4,7 +4,7 @@ A scheduler that schedules HNSW vector index builds from ~50 database shards ont
 
 Start small: the default configuration is **6 shards and 2 GPU workers**. Scaling to 50 shards is a config change, done once the small setup runs end to end.
 
-Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. That is the plan written before building. The design as built, with diagrams and a decisions log, is one doc per phase under `docs/design/`. Read both for the current phase before starting work.
+Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. That is the plan written before building. The design as built, with diagrams and a decisions log, is one doc per phase under `docs/design/`. Significant bugs and their causes are in `docs/bugs.md`. Read the roadmap and design doc for the current phase before starting work.
 
 ## Current phase
 
@@ -61,6 +61,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 - Keep a **Commands** section below up to date as build, test and run commands are added.
 - Tests narrate what they do with `t.Logf` (what was done, what Postgres now holds, what was expected), so `test-logs/latest.log` reads as a record of what happened. Commit the refreshed log with the change that produced it.
 - After each step that adds behavior, run the `crosscheck-tester` agent (`.claude/agents/crosscheck-tester.md`): it writes black-box tests in `scheduler/crosscheck/` from the spec without reading the implementation. Triage its findings as bug, spec gap or test error; fix bugs, turn spec gaps into design-doc rows, and record the outcome in the design doc. Its tests are committed and run with the rest.
+- Significant bugs go in `docs/bugs.md`: symptom, cause, fix, lesson, commit. Log a bug when it changes how we think about the system, is subtle enough to be made again, or was found by a method worth repeating. The log is public.
 - Keep the current phase's doc in `docs/design/` current: every design decision goes in its decisions table (append-only; a reversal is a new row pointing at the old one), and the implementation notes section is updated as components land. Diagrams are Mermaid.
 - **Explain Docker, Kubernetes and Go concepts as you go.** The owner has school-level knowledge of these and deep database knowledge. When you introduce a concept from any of the three (an image vs a container, a Compose service, a goroutine, a Go module, a Deployment, a probe, a taint) explain it in a sentence or two in your reply the first time it comes up. This applies to every agent and subagent working in this repo.
 - **Keep `docs/study-notes.md` up to date.** It is gitignored. Add a short entry for each concept you explained, grouped by topic, so the owner has one place to review. Don't repeat Postgres concepts; those are known.
