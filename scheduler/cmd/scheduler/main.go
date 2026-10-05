@@ -35,6 +35,11 @@ import (
 )
 
 func main() {
+	// `scheduler healthcheck` is the container health probe: the image is
+	// distroless (no shell, no curl), so the binary checks itself.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck(env("LISTEN_ADDR", ":8080")))
+	}
 	log := newLogger(env("LOG_FORMAT", "json"))
 
 	dbURL := os.Getenv("DATABASE_URL")
@@ -91,6 +96,23 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("http shutdown", "err", err)
 	}
+}
+
+// healthcheck GETs /healthz on the local server; 0 if it answers 200.
+func healthcheck(addr string) int {
+	if addr[0] == ':' {
+		addr = "127.0.0.1" + addr
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }
 
 // connectWithRetry keeps trying until Postgres answers or ctx is cancelled,

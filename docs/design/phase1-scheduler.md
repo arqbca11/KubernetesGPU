@@ -224,6 +224,11 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 40 | **`FAKE_FAIL_BUILD_IDS`: the fake builder fails the listed builds at 50%** | No way to fail a fake build | The `fail` path, and later the Phase 4 question of a failed build and a waiting `needs_index` query, need a documented trigger at the process level. |
 | 41 | **After the claim, every exception that is not a cancellation ends in `fail` with `TypeName: message` as the reason, and the worker keeps claiming.** This covers the builder, the estimate, and the worker's own code. If even `fail` cannot be written, the worker logs it and leaves the lease to the reaper | Let the process crash | A crash leaves the row `leased`; the reaper requeues it, the next worker claims it and crashes too: a poison pill looping through the pool. Bug log 5. |
 | 42 | **Retry budget in the reaper.** When a lease expires on a build whose `attempt` has reached `MAX_ATTEMPTS` (scheduler env, default 5), the reaper marks it `failed` with the reason recorded instead of requeueing it. `0` disables | Requeue forever; cap in the worker | A build that kills every worker that claims it, by exception, by the kernel's out-of-memory killer, by a GPU fault, would otherwise cycle through the pool indefinitely (bug log 5). The reaper is the one place that sees every expiry, and it already runs on every scheduler. Decision 36's exception path handles the half it can see; this handles the rest. A legitimate transient outage that costs several leases in a row would also park the build, which is the right trade: the owner sees a `failed` row with a clear reason instead of a silent loop. |
+| 43 | **One Compose file, `deploy/compose.yaml`, project name `kgpu`, every knob an environment variable with a default** (`${LEASE_SECONDS:-30}` style) | One file per environment; hard-coded values | The same file runs the slow realistic defaults and the fast failure-test settings; `scripts/compose-failures.sh` just exports variables. Phase 2's manifests will carry the same variable names. |
+| 44 | **The scheduler image health-checks itself:** `scheduler healthcheck` GETs its own `/healthz`; Compose runs that as the container health probe | `curl` in the image; no health check | The image is distroless, with no shell or curl. A subcommand on the binary is the standard answer and is what the Kubernetes probe will call too. |
+| 45 | **Start order by health, not by start:** workers `depends_on` the scheduler being *healthy*, the scheduler `depends_on` Postgres being *healthy* | Plain `depends_on`; retry loops everywhere | The scheduler applies the schema on start; a worker that starts before the tables exist would fail its first heartbeat. `condition: service_healthy` encodes "the schema exists" as "the scheduler answered `/healthz`". Phase 2 replaces this with readiness probes. |
+| 46 | **Workers are one service with `replicas: 2`; `WORKER_ID` defaults to the container hostname** (the short container id) | Two named worker services; a fixed id per replica | `--scale worker=3` is one flag, which step 7 needs. The id is opaque but unique, and `docker ps --filter id=` maps it back to a container name, which the failure script does to pick its victim. |
+| 47 | **`stop_grace_period: 15s` on workers; `restart: unless-stopped` and `init: true` on scheduler and workers; Postgres on a named volume** | Defaults (10 s grace, no restart, no init, anonymous volume) | The grace period gives decision 37 room to finish or release. The restart policy brings a *crashed* worker back, as Kubernetes will. `init: true` puts tini at PID 1 so SIGTERM is forwarded and, for the crash test, so the worker process is not PID 1: `docker kill` counts as a manual stop (no restart), and the kernel ignores SIGKILL sent to a namespace's init from inside, so the only faithful crash is killing the worker's own pid from inside a container that has an init. The named volume survives `down` without `-v`, so the Phase 2 Postgres-restart test has something to restart. |
 
 ## Implementation notes
 
@@ -344,6 +349,27 @@ Log vocabulary (the `msg` field; tests may match on these):
 | `released back to queue` | The guarded release succeeded |
 
 **Smoke test with real processes (2026-10-04).** Postgres in a container, the Go scheduler binary with a 1 s reap interval, two Python worker processes with a 3 s lease, 1 s renew, 10x time scale. A 2M-vector build (65 s modeled, 6.5 s scaled) was submitted. Worker A claimed it (attempt 1) and was `kill -9`'d after 2 s. The scheduler logged `lease expired, build back to queued … attempt=1 lease_owner=gpu-A`; worker B claimed attempt 2 and completed it; the final row was `done`, attempt 2, 9.8 s after the kill (3 s lease plus 6.5 s build). Then a second build: worker B claimed it, received SIGTERM 1 s in with 5.4 s remaining against a 5 s budget, cancelled at 19%, released it (`queued`, attempt 1, no owner), and exited 0. This is the phase's done-when condition, shown by hand at the process level; step 4 repeats it under Compose and step 6 under the shard simulator.
+
+### Step 4: Docker Compose (done 2026-10-05)
+
+| Path | What |
+| --- | --- |
+| `deploy/compose.yaml` | Postgres 17 on a named volume; the scheduler built from `scheduler/Dockerfile` with a self health check; two worker replicas built from `worker/`; start order by health; every knob an env var with a default (decisions 43 to 47). |
+| `scheduler/cmd/scheduler/main.go` | `scheduler healthcheck` subcommand (decision 44). |
+| `scripts/compose-failures.sh` | Brings the stack up with 5 s leases, 1 s renews and 10x fake builds, then runs the failure tests an operator would run by hand, narrating, and saves `test-logs/phase1/step4-compose-failures.log`. |
+
+What the script does and what it showed (2026-10-05 run):
+
+| Step | Scenario | Observed |
+| --- | --- | --- |
+| 1 | `up -d --build`; wait for health | Postgres healthy, then scheduler healthy, then two workers; pool reports 2 live workers. |
+| 2 | Smoke: one round, one 100k build | Claimed and done in about half a second, attempt 1. |
+| 3 | SIGKILL the worker's python process from inside its container (a crash; the container has tini as PID 1) 2 s into a 6.5 s build | Scheduler logged `lease expired … attempt=1`; the other worker claimed attempt 2 and completed; done 12 s after the kill (5 s lease plus 6.5 s build). The crashed container's log ends at `claimed`. The restart policy brought it back and the pool returned to 2. It took three versions of this step to get a real crash: `docker kill` is a manual stop (no restart), and `kill -9 1` from inside is ignored by the kernel; see the study notes and decision 47. Roadmap failure test 1. |
+| 4 | `docker pause` (SIGSTOP) the leaseholder 1 s in, for 8 s against a 5 s lease, then `docker unpause` | While paused the row was reaped to `queued`. On resume the paused worker logged `renew rejected: lease lost, cancelling build` and `lost ownership` for attempt 1 and wrote nothing more for that attempt. Attempt 2 was claimed and completed exactly once, by whichever worker got to it first (it can be the woken worker itself, re-claiming, which is correct: fencing is about attempts, not identities). Roadmap failure test 2. |
+| 5 | `docker compose restart scheduler` while a build is leased | The worker never noticed: the build completed as attempt 1. The restarted scheduler answered `/healthz` and stamped the round finished. Roadmap failure test 3. |
+| 6 | Resubmit the finished build with a different body | 200, `created:false`, the stored decision. Roadmap failure test 4. |
+
+All four roadmap failure tests pass on the Compose stack. Step 6 repeats them with the shard simulator generating the load, and step 7 at 50 shards.
 
 ### Cross-check of step 3, the worker (2026-10-04)
 

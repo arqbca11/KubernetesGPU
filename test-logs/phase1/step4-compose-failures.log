@@ -1,0 +1,68 @@
+
+== Phase 1 step 4: Compose stack failure tests  (2026-10-04 23:56:47 PDT, commit 56621f2)
+   LEASE_SECONDS=5 RENEW_INTERVAL_SECONDS=1 FAKE_TIME_SCALE=10 REAP_INTERVAL=1s
+
+== 1. Bring the stack up: postgres, scheduler, 2 workers
+    Container kgpu-scheduler-1 Starting 
+    Container kgpu-scheduler-1 Started 
+    Container kgpu-scheduler-1 Waiting 
+    Container kgpu-scheduler-1 Healthy 
+    Container kgpu-worker-2 Starting 
+    Container kgpu-worker-2 Started 
+    Container kgpu-worker-1 Starting 
+    Container kgpu-worker-1 Started 
+   containers:
+   SERVICE     NAME               STATUS
+   postgres    kgpu-postgres-1    Up 8 seconds (healthy)
+   scheduler   kgpu-scheduler-1   Up 6 seconds (healthy)
+   worker      kgpu-worker-1      Up 1 second
+   worker      kgpu-worker-2      Up 1 second
+   pool: {'live_workers': 2, 'largest_mem_bytes': 8589934592}
+
+== 2. Smoke: one round, one 100k build (4.6 s modeled, 0.5 s here) runs to completion
+{"build_id":"0:1","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_m
+
+   {'build_id': '0:1', 'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu'}
+
+== 3. kill -9 the worker process holding a lease mid-build (a crash: SIGKILL to the python process from inside its container; no shutdown path)
+   leased: {'build_id': '0:2', 'state': 'leased', 'attempt': 1, 'lease_owner': '787ead668972', 'placement': 'gpu'}
+   owner 787ead668972 is container kgpu-worker-2; building for 2 s, then kill
+   killed pid 7 ()
+   killed the worker process in kgpu-worker-2 at +0 s
+   done at +11 s: {'build_id': '0:2', 'state': 'done', 'attempt': 2, 'lease_owner': None, 'placement': 'gpu'}
+   scheduler log:
+   | time=2026-10-05T06:57:09.971Z level=WARN msg="lease expired, build back to queued" build_id=0:2 round_id=2 attempt=1 lease_owner=787ead668972
+   the killed worker's log (nothing after 'claimed': it had no chance to say anything):
+   | 06:57:01.653 INFO  claimed build_id=0:1 attempt=1 round_id=1 n_vectors=100000 dim=128 estimate_s=0.46
+   | 06:57:02.125 INFO  completed build_id=0:1 attempt=1 round_id=1 kind=fake index_bytes=64000000 elapsed_s=0.47
+   | 06:57:02.628 INFO  claimed build_id=0:2 attempt=1 round_id=2 n_vectors=2000000 dim=128 estimate_s=6.55
+   the process died on its own, so restart policy (unless-stopped) brings it back; waiting for 2 live workers:
+   kgpu-worker-1      Up 17 seconds
+   kgpu-worker-2      Up 11 seconds
+
+== 4. SIGSTOP a worker past its lease (docker pause), then SIGCONT (docker unpause): the paused-process case fencing exists for
+   leased: {'build_id': '0:3', 'state': 'leased', 'attempt': 1, 'lease_owner': '07ad90550269', 'placement': 'gpu'}
+   owner 07ad90550269 is container kgpu-worker-1; building for 1 s, then pause for 8 s (lease is 5 s)
+   while paused: {'build_id': '0:3', 'state': 'leased', 'attempt': 2, 'lease_owner': '787ead668972', 'placement': 'gpu'}
+   unpaused at +8 s
+   done: {'build_id': '0:3', 'state': 'done', 'attempt': 2, 'lease_owner': None, 'placement': 'gpu'}
+   the paused worker's log: its renew for attempt 1 is rejected when it wakes, it writes nothing more
+   | 06:57:17.287 INFO  claimed build_id=0:3 attempt=1 round_id=3 n_vectors=2000000 dim=128 estimate_s=6.55
+   | 06:57:26.630 WARNING renew rejected: lease lost, cancelling build build_id=0:3 attempt=1 round_id=3
+   | 06:57:26.631 WARNING lost ownership build_id=0:3 attempt=1 round_id=3 why=lease was lost during the build; not completing
+   exactly one completion of this build across all workers (whichever claimed attempt 2; the woken worker may itself re-claim):
+      | 06:57:31.035 INFO  completed build_id=0:3 attempt=2 round_id=3 kind=fake index_bytes=1280000000 elapsed_s=6.56
+
+== 5. Restart the scheduler mid-round: all state is in Postgres, so the round still completes
+   leased: {'build_id': '0:4', 'state': 'leased', 'attempt': 1, 'lease_owner': '787ead668972', 'placement': 'gpu'}
+   restarting the scheduler container now
+   scheduler back: {"status":"ok"}
+   done: {'build_id': '0:4', 'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu'}
+   round 4 finished_at=2026-10-05T06:57:40.107157Z (stamped by the restarted scheduler)
+
+== 6. Duplicate submit through the real API is a no-op
+   {"build_id":"0:4","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_
+
+== Result: PASS
+   stack removed (KEEP=1 keeps it)
+log: test-logs/phase1/step4-compose-failures.log

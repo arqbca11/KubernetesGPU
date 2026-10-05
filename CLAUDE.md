@@ -81,6 +81,8 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | Python unit tests only, no database | `cd worker && uv run pytest` (database tests skip without `TEST_DATABASE_URL`) |
 | Run the worker locally | `cd worker && DATABASE_URL=... LOG_FORMAT=text FAKE_TIME_SCALE=10 uv run python -m kgpu_worker` (env vars in `worker/kgpu_worker/config.py`) |
 | Build the worker image | `docker build -t kgpu-worker worker/` |
+| Run the whole stack | `docker compose -f deploy/compose.yaml up -d --build` (add `--scale worker=3` for three workers); `docker compose -f deploy/compose.yaml logs -f scheduler worker`; `docker compose -f deploy/compose.yaml down -v` to stop and drop the database. API on `127.0.0.1:8080`. Knobs are env vars, see the top of `deploy/compose.yaml`; `FAKE_TIME_SCALE=10` speeds fake builds up. |
+| Compose failure tests (kill, pause, scheduler restart, duplicate submit) | `scripts/compose-failures.sh` (saves `test-logs/phase1/step4-compose-failures.log`; `KEEP=1` leaves the stack up) |
 
 | Run the scheduler locally | `DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/kgpu?sslmode=disable LOG_FORMAT=text go run ./scheduler/cmd/scheduler` (env vars documented at the top of `scheduler/cmd/scheduler/main.go`) |
 | Build the scheduler image | `docker build -f scheduler/Dockerfile -t kgpu-scheduler .` (context is the repo root) |

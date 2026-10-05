@@ -72,6 +72,19 @@ Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are n
 | test_build_error_marks_failed_with_reason_and_worker_continues | One build is listed in `FAKE_FAIL_BUILD_IDS`, another is healthy. | The failing build ends `failed` with `RuntimeError: injected failure…` as the reason and no lease; the worker completes the healthy one and does not crash (decisions 40, 41). |
 | test_bad_config_is_refused_before_connecting | Zero bandwidth, renew interval equal to the lease, negative time scale, a non-numeric cost constant, an unknown log format. | Each is refused with a message naming the variable, before any connection (decision 39). |
 
+## Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`
+
+Not a test suite but an operator's script: it brings the real stack up and does to it what the roadmap's failure tests describe, narrating what Postgres and the container logs show.
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 1 | `docker compose up --build`, wait for health | Start order by health works: Postgres, then scheduler (which applies the schema), then two workers register. |
+| 2 | One round, one small build | The stack does the normal thing end to end. |
+| 3 | SIGKILL the worker's python process from inside its container (tini is PID 1), mid-build | A crash leaves no chance to release. The lease expires, the reaper requeues, the other worker completes attempt 2, exactly once. The restart policy brings the crashed worker back. (An external `docker kill` is a manual stop and is not restarted; `kill -9 1` from inside is ignored by the kernel.) Roadmap failure test 1. |
+| 4 | `docker pause` the leaseholder past its lease, then `docker unpause` | The paused process wakes holding attempt 1, its renew is rejected, it logs `lost ownership` and writes nothing more for that attempt; attempt 2 is completed exactly once, by whichever worker claimed it (possibly the woken one, re-claiming). Roadmap failure test 2. |
+| 5 | `docker compose restart scheduler` while a build is leased | The worker is unaffected (talks to Postgres, not the scheduler); the build completes as attempt 1; the restarted scheduler stamps the round. Roadmap failure test 3. |
+| 6 | Resubmit a finished build with a different body | 200 `created:false`, the stored decision. Roadmap failure test 4. |
+
 ## Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`
 
 These start the real `python -m kgpu_worker` as a subprocess, configure it only through its documented environment variables, and watch Postgres and its log.

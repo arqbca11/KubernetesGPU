@@ -187,16 +187,16 @@ RETURNING build_id, attempt, n_vectors, dim;
 - [x] Reaper in the scheduler
 - [ ] Shard simulator: one binary running N shards as goroutines. Each shard submits its build, generates its query stream, runs the local build and ready queries on its single CPU under the rules above, reports its load every poll interval, and obeys placement changes in the reply (abort a preempted local build; start a build moved to local)
 - [ ] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
-- [ ] Docker Compose: Postgres, scheduler, shard simulator, 2 workers. 6 shards by default.
+- [x] Docker Compose: Postgres, scheduler, 2 workers (shard simulator joins in the next step). 6 shards by default.
 - [ ] Per-round timeline output: for each shard, the build (with any placement change) and each query's arrival, start and end
 - [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
 
 ### Failure tests
 
-- [ ] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once
-- [ ] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for.
-- [ ] Restart the scheduler mid-round: the round still completes, because all state is in Postgres
-- [ ] A shard resubmits the same build: the primary key makes it a no-op
+- [x] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once *(on Compose, step 4; to be repeated under the shard simulator in step 6 and at 50 shards in step 7)*
+- [x] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for. *(Compose, step 4; repeat in steps 6 and 7)*
+- [x] Restart the scheduler mid-round: the round still completes, because all state is in Postgres *(Compose, step 4; repeat in steps 6 and 7)*
+- [x] A shard resubmits the same build: the primary key makes it a no-op *(API level, steps 2 and 4; repeat with the real shard client in step 6)*
 
 ## Phase 2: Kubernetes on kind
 

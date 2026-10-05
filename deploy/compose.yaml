@@ -1,0 +1,84 @@
+# Phase 1 stack: Postgres, the scheduler, N GPU workers (fake builds).
+#
+#   docker compose -f deploy/compose.yaml up -d --build          # 2 workers (default)
+#   docker compose -f deploy/compose.yaml up -d --scale worker=3
+#   docker compose -f deploy/compose.yaml logs -f scheduler worker
+#   docker compose -f deploy/compose.yaml down -v                # also drops the database
+#
+# Knobs are environment variables with defaults below; set them in the shell
+# or in deploy/.env. FAKE_TIME_SCALE=10 makes fake builds 10x faster.
+
+name: kgpu
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: kgpu
+      POSTGRES_DB: kgpu
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kgpu"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    ports:
+      - "127.0.0.1:${PG_PORT:-15432}:5432"   # for psql from the host; not needed by the stack
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: scheduler/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:kgpu@postgres:5432/kgpu?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      POLICY: ${POLICY:-always_gpu}
+      REAP_INTERVAL: ${REAP_INTERVAL:-1s}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
+      WORKER_STALE_AFTER: ${WORKER_STALE_AFTER:-15s}
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    # init: true puts a tiny init (tini) at PID 1 that forwards signals and reaps
+    # children. Our process is then PID 7 or so: it can be killed from inside the
+    # container to simulate a crash (the kernel ignores SIGKILL sent to a PID
+    # namespace's init from within), and the restart policy then recovers it.
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/scheduler", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../worker
+    deploy:
+      replicas: 2
+    environment:
+      DATABASE_URL: postgres://postgres:kgpu@postgres:5432/kgpu?sslmode=disable
+      # WORKER_ID defaults to the container hostname (its short id), so each replica is distinct.
+      WORKER_MEM_BYTES: ${WORKER_MEM_BYTES:-8589934592}
+      LEASE_SECONDS: ${LEASE_SECONDS:-30}
+      RENEW_INTERVAL_SECONDS: ${RENEW_INTERVAL_SECONDS:-10}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
+      FAKE_TIME_SCALE: ${FAKE_TIME_SCALE:-1}
+      SHUTDOWN_FINISH_BUDGET_SECONDS: ${SHUTDOWN_FINISH_BUDGET_SECONDS:-5}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    init: true
+    depends_on:
+      scheduler:
+        condition: service_healthy   # the scheduler applies the schema; workers need it to exist
+    # docker stop sends SIGTERM and waits this long before SIGKILL; the worker
+    # finishes or releases its build in that window (design decision 37).
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
