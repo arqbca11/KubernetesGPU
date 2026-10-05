@@ -10,6 +10,11 @@ Narrated test output, kept so what was checked and what happened can be read wit
 | `phase1/step2-crosscheck.log` | The independent cross-check agent's tests for steps 1 and 2, written from the spec without reading the implementation (Go, `scheduler/crosscheck`, non-worker tests). |
 | `phase1/step3-worker.log` | Step 3: the Python worker (`worker/tests`). |
 | `phase1/step3-crosscheck-worker.log` | The cross-check agent's tests for the worker, run as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). |
+| `phase1/step4-compose-failures.log` | Step 4: the operator's failure script on the Compose stack (crash, pause, scheduler restart, duplicate submit). |
+| `phase1/step4-crosscheck-compose.log` | The cross-check agent's nine Compose scenarios (`Compose*` tests, need `KGPU_COMPOSE=1`). |
+| `phase1/step5-workload.log` | Step 5: the workload generator's 13 tests (written by an independent agent). |
+| `phase1/step5-shardsim.log` | Step 5: the shard simulator against the real API and Postgres (end-to-end round, local build blocking, preemption). |
+| `phase1/step5-compose-round.log` | Step 5: the first real six-shard round on the Compose stack, with the timeline. |
 
 Per-step logs are the state of the tests at the end of that step, including any fixes from the step's cross-check round, regenerated whenever the step's code changes. `history/` (local only, not committed) keeps every timestamped run.
 

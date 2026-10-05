@@ -1,980 +1,132 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-05 00:24:13 PDT
-commit:    51716f8 (uncommitted changes)
+date:      2026-10-05 02:50:55 PDT
+commit:    add1f1f (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-60650, port 23537)
-go:        go test -p 1 -v ./...
-python:    uv run pytest -v -rA (worker/)
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-62784, port 31095)
+go:        go test -p 1 -count=1 -v ./experiments/workload/
+python:    skipped
 
 Lines starting with 'store_test.go:N:' are the test narrating what it did.
 Lines tagged [db] are the build row as Postgres had it at that moment.
 
 == go test
-?   	github.com/arqbca11/KubernetesGPU/db	[no test files]
-=== RUN   TestEndToEndRoundOverHTTP
-    api_test.go:95: --- a worker with 8 GiB registers by heartbeat (workers use SQL, not HTTP)
-    api_test.go:100: GET /workers
-              -> 200 {"pool":{"live_workers":1,"largest_mem_bytes":8589934592},"workers":[{"worker_id":"gpu-1","mem_bytes":8589934592,"last_seen":"2026-10-05T00:24:14.978012-07:00",...
-    api_test.go:105: --- shard simulator starts a round of 2 shards
-    api_test.go:107: POST /rounds {"scenario":"test","seed":42,"n_shards":2}
-              -> 201 {"round_id":1}
-    api_test.go:119: --- shard 1 submits a 100k x 128 build; it knows nothing about future queries
-    api_test.go:121: POST /builds {"round_id":1,"shard_id":1,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"1:1","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
-    api_test.go:125:     placed on gpu; estimates: cpu 20631 ms, gpu 4639 ms, mem 97 MiB
-    api_test.go:127: --- shard 1 resubmits the same build (retry after a timeout, say)
-    api_test.go:129: POST /builds {"round_id":1,"shard_id":1,"n_vectors":100000,"dim":128}
-              -> 200 {"build_id":"1:1","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":102400000,"created":false,"cpu_build_ms":20...
-    api_test.go:134: --- shard 2 submits a 20M x 128 build: 19 GiB modeled memory, more than any live worker
-    api_test.go:136: POST /builds {"round_id":1,"shard_id":2,"n_vectors":20000000,"dim":128}
-              -> 201 {"build_id":"2:1","placement":"local","priority":0,"reason":"needs 20480000000 bytes, largest live worker has 8589934592","mem_bytes":20480000000,"created":true...
-    api_test.go:140:     placed local: needs 20480000000 bytes, largest live worker has 8589934592
-    api_test.go:142: --- queries arrive at shard 1 while its build is queued on the gpu
-    api_test.go:143: POST /jobs/1/1 {"seq":0,"duration_ms":50,"needs_index":false}
-              -> 201 {"created":true,"round_id":1,"seq":0,"shard_id":1}
-    api_test.go:146: POST /jobs/1/1 {"seq":0,"duration_ms":50,"needs_index":false}
-              -> 200 {"created":false,"round_id":1,"seq":0,"shard_id":1}
-    api_test.go:149: POST /jobs/1/1 {"seq":1,"duration_ms":50,"needs_index":true}
-              -> 201 {"created":true,"round_id":1,"seq":1,"shard_id":1}
-    api_test.go:151: --- shard 1 reports: 2 waiting, 1 of them needs the index; the reply tells it the build is still queued
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":2,"waiting_needs_index":1,"oldest_wait_ms":120,"build_progress":0,"stream_done":false}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:157: --- shard 1's cpu is free, so query 0 (needs_index=false) runs now
-    api_test.go:158: POST /jobs/1/1/0/start
-              -> 200 {"event":"started","round_id":1,"seq":0,"shard_id":1}
-    api_test.go:161: POST /jobs/1/1/0/done
-              -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":1}
-    api_test.go:164: POST /jobs/1/1/0/done
-              -> 409 {"error":"job cannot be finished: started_at=2026-10-05 00:24:15.00012 -0700 PDT finished_at=2026-10-05 00:24:15.001093 -0700 PDT"}
-    api_test.go:168: --- the gpu worker claims and completes shard 1's build (SQL, as the Python worker will)
-    api_test.go:177: --- shard 1's next report learns the build is done; query 1 (needs_index) runs; stream exhausted
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":1,"waiting_needs_index":1,"oldest_wait_ms":300,"build_progress":0,"stream_done":false}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:182: POST /jobs/1/1/1/start
-              -> 200 {"event":"started","round_id":1,"seq":1,"shard_id":1}
-    api_test.go:183: POST /jobs/1/1/1/done
-              -> 200 {"event":"finished","round_id":1,"seq":1,"shard_id":1}
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:186: --- shard 2: one query arrives during its local build, then the build finishes, the query runs
-    api_test.go:187: POST /jobs/1/2 {"seq":0,"duration_ms":50,"needs_index":true}
-              -> 201 {"created":true,"round_id":1,"seq":0,"shard_id":2}
-    api_test.go:113: POST /shards/1/2/report {"queue_depth":1,"waiting_needs_index":1,"oldest_wait_ms":900,"build_progress":0.6,"stream_done":false}
-              -> 200 {"build":{"build_id":"2:1","placement":"local","state":"running","attempt":0}}
-    api_test.go:189: POST /builds/2:1/done
-              -> 200 {"build_id":"2:1","state":"done"}
-    api_test.go:192: POST /builds/2:1/done
-              -> 409 {"error":"build is local/done, not a running local build"}
-    api_test.go:195: POST /builds/1:1/done
-              -> 409 {"error":"build is gpu/done, not a running local build"}
-    api_test.go:198: POST /jobs/1/2/0/start
-              -> 200 {"event":"started","round_id":1,"seq":0,"shard_id":2}
-    api_test.go:199: POST /jobs/1/2/0/done
-              -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":2}
-    api_test.go:201: --- the round is still open: shard 2 has not said its stream is done
-    api_test.go:203: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T00:24:14.982977-07:00","finished_at":null},"builds":[{"build_id":"1:1",...
-    api_test.go:113: POST /shards/1/2/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"2:1","placement":"local","state":"done","attempt":0}}
-    api_test.go:209: --- the reaper tick (or a GET) stamps the round finished
-    api_test.go:211: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T00:24:14.982977-07:00","finished_at":"2026-10-05T00:24:15.013009-07:00"...
-    api_test.go:219:     build 1:1: gpu/done attempt 1
-    api_test.go:219:     build 2:1: local/done attempt 0
-    api_test.go:224:     round 1 finished; duration 30ms
---- PASS: TestEndToEndRoundOverHTTP (0.09s)
-=== RUN   TestReportReflectsPreemption
-    api_test.go:231: POST /rounds {"scenario":"test","seed":1,"n_shards":1}
-              -> 201 {"round_id":2}
-    api_test.go:235: POST /builds {"round_id":2,"shard_id":0,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"0:2","placement":"local","priority":0,"reason":"needs 102400000 bytes, largest live worker has 1","mem_bytes":102400000,"created":true,"cpu_build_m...
-    api_test.go:239: --- shard 0 builds locally and reports a growing queue
-    api_test.go:241: POST /shards/2/0/report {"queue_depth":5,"waiting_needs_index":1,"oldest_wait_ms":4000,"build_progress":0.2,"stream_done":false}
-              -> 200 {"build":{"build_id":"0:2","placement":"local","state":"running","attempt":0}}
-    api_test.go:245: --- (Phase 3 reconsider) preempts the build to the gpu queue
-    api_test.go:249: --- the shard's next report tells it: abort the local build
-    api_test.go:250: POST /shards/2/0/report {"queue_depth":6,"waiting_needs_index":1,"oldest_wait_ms":4500,"build_progress":0.3,"stream_done":false}
-              -> 200 {"build":{"build_id":"0:2","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:254: POST /builds/0:2/done
-              -> 409 {"error":"build is gpu/queued, not a running local build"}
-    api_test.go:257: --- a report for a shard with no build is 404; out-of-range fields are 400
-    api_test.go:258: POST /shards/2/7/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false}
-              -> 404 {"error":"this shard has no build in this round; submit first"}
-    api_test.go:261: POST /shards/2/0/report {"queue_depth":1,"waiting_needs_index":2,"oldest_wait_ms":0,"build_progress":0,"stream_done":false}
-              -> 400 {"error":"report fields out of range"}
---- PASS: TestReportReflectsPreemption (0.02s)
-=== RUN   TestValidationAndNotFound
-    api_test.go:290: POST /rounds {"scenario":"","seed":0,"n_shards":0}
-              -> 400 {"error":"n_shards must be positive"}
-    api_test.go:290: POST /rounds {"n_shards":1,"bogus":1}
-              -> 400 {"error":"bad json: json: unknown field \"bogus\""}
-    api_test.go:290: GET /rounds/999999
-              -> 404 {"error":"no such round"}
-    api_test.go:290: GET /rounds/abc
-              -> 400 {"error":"id must be an integer"}
-    api_test.go:290: POST /builds {"round_id":999999,"shard_id":1,"n_vectors":10,"dim":4}
-              -> 404 {"error":"no such round"}
-    api_test.go:290: POST /builds {"round_id":1,"shard_id":1,"n_vectors":0,"dim":4}
-              -> 400 {"error":"round_id, n_vectors and dim must be positive; shard_id non-negative"}
-    api_test.go:290: POST /builds/nope/done
-              -> 404 {"error":"no such build"}
-    api_test.go:290: POST /jobs/999999/1/0/start
-              -> 404 {"error":"no such job"}
-    api_test.go:290: GET /builds/nope
-              -> 404 {"error":"no such build"}
-    api_test.go:290: POST /jobs/999999/1 {"seq":-1,"duration_ms":0,"needs_index":false}
-              -> 400 {"error":"seq and duration_ms must be non-negative"}
-    api_test.go:290: GET /healthz
-              -> 200 {"status":"ok"}
---- PASS: TestValidationAndNotFound (0.01s)
-=== RUN   TestSubmitValidationAgainstRound
-    api_test.go:300: POST /rounds {"scenario":"test","seed":1,"n_shards":2}
-              -> 201 {"round_id":3}
-    api_test.go:303: --- shard ids are the shard's own numbering; 7 and 42 are fine in a 2-shard round
-    api_test.go:305: POST /builds {"round_id":3,"shard_id":7,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"7:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
-    api_test.go:308: POST /builds {"round_id":3,"shard_id":42,"n_vectors":10,"dim":4}
-              -> 201 {"build_id":"42:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":320,"created":true,"cpu_build_ms":0,"gpu_total_ms":2000}
-    api_test.go:312: --- a third distinct shard would let the round finish early: refused
-    api_test.go:313: POST /builds {"round_id":3,"shard_id":99,"n_vectors":10,"dim":4}
-              -> 409 {"error":"round already has n_shards builds"}
-    api_test.go:317: --- a duplicate with a different body returns estimates for the STORED row, and is fine in a full round
-    api_test.go:318: POST /builds {"round_id":3,"shard_id":7,"n_vectors":5,"dim":128}
-              -> 200 {"build_id":"7:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":102400000,"created":false,"cpu_build_ms":20...
-    api_test.go:323: --- finish the round; a duplicate is still 200, a new build would be 409
-    api_test.go:332: POST /shards/3/7/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"7:3","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:332: POST /shards/3/42/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"42:3","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:335: GET /rounds/3
-              -> 200 {"round":{"round_id":3,"scenario":"test","seed":1,"n_shards":2,"started_at":"2026-10-05T00:24:15.059788-07:00","finished_at":"2026-10-05T00:24:15.070913-07:00"}...
-    api_test.go:339: POST /builds {"round_id":3,"shard_id":42,"n_vectors":10,"dim":4}
-              -> 200 {"build_id":"42:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":320,"created":false,"cpu_build_ms":0,"gpu_...
---- PASS: TestSubmitValidationAgainstRound (0.02s)
+=== RUN   TestDeterminism
+    generate_test.go:49: Contract (workload.go): Generate is pure; same Scenario and seed give byte-identical output. CLAUDE.md invariant 10: workloads are seeded and reproducible.
+    generate_test.go:61: uniform: generated twice with seed 42 -> 134770 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: skewed: generated twice with seed 42 -> 345982 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: bimodal: generated twice with seed 42 -> 345887 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: downstream_heavy: generated twice with seed 42 -> 199142 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: staggered: generated twice with seed 42 -> 477841 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: shrinking_pool: generated twice with seed 42 -> 345990 bytes of JSON, identical; seed 43 differs, as expected.
+--- PASS: TestDeterminism (0.03s)
+=== RUN   TestPresetsValidate
+    generate_test.go:66: Contract: consumers run Validate() on every workload. Every preset must pass at 6 shards (roadmap default) and 50 (Phase 1 step 7), over several seeds.
+    generate_test.go:81: uniform n=6: 5 seeds validate; seed 1 has 1252 shard-level queries, cluster rate 23.7/s, horizon 30s.
+    generate_test.go:81: skewed n=6: 5 seeds validate; seed 1 has 3412 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: bimodal n=6: 5 seeds validate; seed 1 has 3411 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: downstream_heavy n=6: 5 seeds validate; seed 1 has 2010 shard-level queries, cluster rate 46.5/s, horizon 30s.
+    generate_test.go:81: staggered n=6: 5 seeds validate; seed 1 has 4632 shard-level queries, cluster rate 63.2/s, horizon 40s.
+    generate_test.go:81: shrinking_pool n=6: 5 seeds validate; seed 1 has 3412 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: uniform n=50: 5 seeds validate; seed 1 has 11699 shard-level queries, cluster rate 44.1/s, horizon 30s.
+    generate_test.go:81: skewed n=50: 5 seeds validate; seed 1 has 29934 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:81: bimodal n=50: 5 seeds validate; seed 1 has 30021 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:81: downstream_heavy n=50: 5 seeds validate; seed 1 has 12052 shard-level queries, cluster rate 83.7/s, horizon 30s.
+    generate_test.go:81: staggered n=50: 5 seeds validate; seed 1 has 40086 shard-level queries, cluster rate 117.6/s, horizon 40s.
+    generate_test.go:81: shrinking_pool n=50: 5 seeds validate; seed 1 has 29934 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:90: Unknown preset name and 0 shards are rejected with an error.
+--- PASS: TestPresetsValidate (0.05s)
+=== RUN   TestZipfSkew
+    generate_test.go:108: Roadmap Phase 3 sweep: Zipf exponent 0.5, 1.0, 1.5. Rank-size Zipf (size of rank r = Max/r^s) at 6 shards gives largest/median of about 1.9, 3.4, 6.3.
+    generate_test.go:122: exponent 0.5: sizes [81650 89443 200000 100000 115470 141421], largest/median 1.86
+    generate_test.go:122: exponent 1.0: sizes [33333 40000 200000 50000 66667 100000], largest/median 3.43
+    generate_test.go:122: exponent 1.5: sizes [13608 17889 200000 25000 38490 70711], largest/median 6.30
+    generate_test.go:133: As expected: 1.0 is several times the median, 1.5 more, 0.5 less.
+--- PASS: TestZipfSkew (0.00s)
+=== RUN   TestBimodalTwoClusters
+    generate_test.go:137: Roadmap scenario Bimodal: a few huge builds, many tiny; some huge builds exceed one worker's memory. Light cluster in [Min, 2*Min], heavy in [0.8*Max, Max], heavy count round(0.25*n), worker memory fits heavy builds up to 0.9*Max.
+    generate_test.go:165: n=6: 2 heavy, 4 light, nothing in the gap; 1 heavy builds exceed 219 MB worker memory.
+    generate_test.go:165: n=50: 13 heavy, 37 light, nothing in the gap; 6 heavy builds exceed 219 MB worker memory.
+--- PASS: TestBimodalTwoClusters (0.00s)
+=== RUN   TestClusterQueryRate
+    generate_test.go:172: StreamProfile.ClusterQueryRate is the mean coordinator-level query rate. Arrivals are Poisson, so the count over the horizon should be within 4 sqrt(expected) of rate*horizon.
+    generate_test.go:184: uniform n=6: 652 cluster queries vs expected 711 (tolerance 107).
+    generate_test.go:184: uniform n=50: 1291 cluster queries vs expected 1324 (tolerance 146).
+    generate_test.go:184: skewed n=6: 1792 cluster queries vs expected 1895 (tolerance 174).
+    generate_test.go:184: skewed n=50: 3514 cluster queries vs expected 3529 (tolerance 238).
+    generate_test.go:184: downstream_heavy n=6: 1392 cluster queries vs expected 1396 (tolerance 149).
+    generate_test.go:184: downstream_heavy n=50: 2511 cluster queries vs expected 2510 (tolerance 200).
+--- PASS: TestClusterQueryRate (0.01s)
+=== RUN   TestPerShardLoadMatchesTarget
+    generate_test.go:192: Presets derive the cluster rate from a target per-shard CPU utilisation (skewed: 0.4) so load per shard is the same at 6 and 50 shards (roadmap sweep: query load relative to build work). Check the realised mean piece duration and offered load.
+    generate_test.go:214: n=6: 14133 pieces, mean 20.003404ms (configured 20ms), per-shard utilisation 0.393 (target 0.4).
+    generate_test.go:214: n=50: 120310 pieces, mean 19.839436ms (configured 20ms), per-shard utilisation 0.398 (target 0.4).
+--- PASS: TestPerShardLoadMatchesTarget (0.00s)
+=== RUN   TestNeedsIndexFraction
+    generate_test.go:219: NeedsIndexFraction is by cluster query (contract), and every piece of one cluster query agrees. Roadmap sweep values 0, 0.5, 1. Local DDL never needs the index.
+    generate_test.go:247: configured 0.00: 0 of 3549 cluster queries need the index (0.000).
+    generate_test.go:247: configured 0.50: 1731 of 3549 cluster queries need the index (0.488).
+    generate_test.go:247: configured 0.80: 2831 of 3549 cluster queries need the index (0.798).
+    generate_test.go:247: configured 1.00: 3549 of 3549 cluster queries need the index (1.000).
+--- PASS: TestNeedsIndexFraction (0.01s)
+=== RUN   TestFanOutPieces
+    generate_test.go:252: A fan-out query produces one piece on each of k distinct shards, k in [FanOutShardsMin, FanOutShardsMax], all with the same ClusterQueryID and Arrival (contract). Single-shard queries have exactly one piece.
+    generate_test.go:290: n=6: 571 fan-out queries (fraction 0.301, configured 0.30) with widths spanning [2,6]; 1323 single-shard queries; all pieces share arrival.
+    generate_test.go:290: n=50: 1081 fan-out queries (fraction 0.312, configured 0.30) with widths spanning [2,50]; 2385 single-shard queries; all pieces share arrival.
+--- PASS: TestFanOutPieces (0.00s)
+=== RUN   TestHotShard
+    generate_test.go:295: Roadmap scenario Downstream-heavy: one shard has a much higher query rate. Contract: the hot shard receives HotShardRateMultiplier times its share of single-shard queries. The preset also sizes the multiplier so the hot shard's total load is 4x a typical shard's.
+    generate_test.go:331: n=6: multiplier 8.9; hot shard got 8.61x a typical shard's single-shard queries and 3.80x its CPU load (target 4).
+    generate_test.go:331: n=50: multiplier 24.1; hot shard got 23.58x a typical shard's single-shard queries and 4.02x its CPU load (target 4).
+    generate_test.go:335: Without a hot shard (skewed, HotShard=-1) single-shard routing is uniform; checked by the totals below.
+    generate_test.go:343:   skewed shard 0: 213 single-shard queries
+    generate_test.go:343:   skewed shard 1: 206 single-shard queries
+    generate_test.go:343:   skewed shard 2: 241 single-shard queries
+    generate_test.go:343:   skewed shard 3: 236 single-shard queries
+    generate_test.go:343:   skewed shard 4: 201 single-shard queries
+    generate_test.go:343:   skewed shard 5: 221 single-shard queries
+--- PASS: TestHotShard (0.01s)
+=== RUN   TestStreamFiniteAndSorted
+    generate_test.go:348: Decision 30: the stream is finite per round. Contract: each shard's queries are sorted by Arrival and nothing arrives after Horizon; shard ids 0..n-1 in order; ClusterQueryIDs of non-fan-out queries are unique.
+    generate_test.go:381: uniform n=50: 11849 queries, all sorted, last arrival 29.998s <= horizon 30s.
+    generate_test.go:381: skewed n=50: 29749 queries, all sorted, last arrival 29.988s <= horizon 30s.
+    generate_test.go:381: bimodal n=50: 29721 queries, all sorted, last arrival 29.998s <= horizon 30s.
+    generate_test.go:381: downstream_heavy n=50: 11925 queries, all sorted, last arrival 29.989s <= horizon 30s.
+    generate_test.go:381: staggered n=50: 39295 queries, all sorted, last arrival 39.997s <= horizon 40s.
+    generate_test.go:381: shrinking_pool n=50: 29749 queries, all sorted, last arrival 29.988s <= horizon 30s.
+--- PASS: TestStreamFiniteAndSorted (0.01s)
+=== RUN   TestLocalDDL
+    generate_test.go:386: Owner guidance: local DDL is rare, long and touches one shard. Generated per shard as Poisson at LocalDDLRatePerShard with mean LocalDDLDuration; check count and mean over a long horizon.
+    generate_test.go:408: 83 local DDL statements (expected 100), mean duration 2.047s (configured 2s), 100x a query's mean.
+--- PASS: TestLocalDDL (0.02s)
+=== RUN   TestDDLOffsets
+    generate_test.go:412: Roadmap scenario Staggered: shards submit at different times. Contract: staggered offsets lie in [0, Spread]; all_at_once offsets are zero. Stratified sampling means the earliest offset is in the first 1/n of Spread and the latest in the last 1/n.
+    generate_test.go:430: staggered n=6: offsets span [1.437s, 14.881s] within Spread 15s; horizon 40s outlasts it.
+    generate_test.go:430: staggered n=50: offsets span [8ms, 14.799s] within Spread 15s; horizon 40s outlasts it.
+    generate_test.go:442: All other presets are all_at_once and every offset is zero.
+--- PASS: TestDDLOffsets (0.00s)
+=== RUN   TestPresetTable
+    generate_test.go:446: Prints the preset parameters (used for DESIGN.md); no assertions beyond construction.
+    generate_test.go:451: n=6 uniform          sizes=uniform[100000,100000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=23.7/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 skewed           sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 bimodal          sizes=bimodal[10000,400000] s=0.0 heavy=0.25 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=219MB
+    generate_test.go:451: n=6 downstream_heavy sizes=uniform[80000,120000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=46.5/s fan=0.15 k=[2,6] needs=0.80 meanQ=20ms lddl=0.005/2s hot=0 x8.9 workers=2 mem=16384MB
+    generate_test.go:451: n=6 staggered        sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=staggered/15s horizon=40s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 shrinking_pool   sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=50 uniform          sizes=uniform[100000,100000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=44.1/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 skewed           sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 bimodal          sizes=bimodal[10000,400000] s=0.0 heavy=0.25 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=219MB
+    generate_test.go:451: n=50 downstream_heavy sizes=uniform[80000,120000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=83.7/s fan=0.15 k=[2,50] needs=0.80 meanQ=20ms lddl=0.005/2s hot=0 x24.1 workers=3 mem=16384MB
+    generate_test.go:451: n=50 staggered        sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=staggered/15s horizon=40s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 shrinking_pool   sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+--- PASS: TestPresetTable (0.00s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.722s
-?   	github.com/arqbca11/KubernetesGPU/scheduler/cmd/scheduler	[no test files]
-=== RUN   TestDefaultsAreInTheIntendedRange
-    costmodel_test.go:12: 100k x 128: cpu=20.631162433s gpu(total incl. transfer)=4.639116243s mem=97 MiB
-    costmodel_test.go:21: 1k x 128: cpu=123.786974ms gpu=2.018138697s
---- PASS: TestDefaultsAreInTheIntendedRange (0.00s)
-=== RUN   TestMonotonicInSize
---- PASS: TestMonotonicInSize (0.00s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/costmodel	(cached)
-=== RUN   TestComposeKill9LeaseholderMidBuild
-    compose_test.go:52: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposeKill9LeaseholderMidBuild (0.00s)
-=== RUN   TestComposePauseLeaseholderPastLease
-    compose_test.go:116: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposePauseLeaseholderPastLease (0.00s)
-=== RUN   TestComposeSchedulerRestartMidRound
-    compose_test.go:179: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposeSchedulerRestartMidRound (0.00s)
-=== RUN   TestComposeReaperResumesAfterSchedulerOutage
-    compose_test.go:247: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposeReaperResumesAfterSchedulerOutage (0.00s)
-=== RUN   TestComposeDuplicateSubmit
-    compose_test.go:276: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposeDuplicateSubmit (0.00s)
-=== RUN   TestComposeDockerStopLeaseholder
-=== RUN   TestComposeDockerStopLeaseholder/LongRemainderIsReleased
-    compose_test.go:330: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
-=== RUN   TestComposeDockerStopLeaseholder/ShortRemainderIsFinished
-    compose_test.go:385: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- PASS: TestComposeDockerStopLeaseholder (0.00s)
-    --- SKIP: TestComposeDockerStopLeaseholder/LongRemainderIsReleased (0.00s)
-    --- SKIP: TestComposeDockerStopLeaseholder/ShortRemainderIsFinished (0.00s)
-=== RUN   TestComposeScaleToThreeWorkers
-    compose_test.go:422: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposeScaleToThreeWorkers (0.00s)
-=== RUN   TestComposePostgresRestartMidBuild
-    compose_test.go:481: KGPU_COMPOSE=1 not set: compose tests need Docker and take minutes
---- SKIP: TestComposePostgresRestartMidBuild (0.00s)
-=== RUN   TestReportUpsertsStatusAndRepliesWithBuild
-    crosscheck_test.go:21: submitted build 4:4, placement=gpu (AlwaysGPU, zero live workers -> gpu, decision 19)
-    crosscheck_test.go:26: first report -> 200 {"build":{"build_id":"4:4","placement":"gpu","state":"queued","attempt":0}}
-    crosscheck_test.go:36: second report -> 200 {"build":{"build_id":"4:4","placement":"gpu","state":"queued","attempt":0}}
-    crosscheck_test.go:42: [db] shard_status rows for round 4: [{RoundID:4 ShardID:4 QueueDepth:1 WaitingNeedsIndex:1 OldestWaitMs:900 BuildProgress:0 StreamDone:true UpdatedAt:2026-10-05 00:24:15.791402 -0700 PDT}]
---- PASS: TestReportUpsertsStatusAndRepliesWithBuild (0.03s)
-=== RUN   TestReportReplyTracksWorkerProgress
-    crosscheck_test.go:66: after claim (attempt 1), report -> 200 {"build":{"build_id":"0:5","placement":"gpu","state":"leased","attempt":1}}
-    crosscheck_test.go:75: after complete, report -> 200 {"build":{"build_id":"0:5","placement":"gpu","state":"done","attempt":1}}
-    crosscheck_test.go:76: [db] after complete: build_id=0:5 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.812596-07:00 finished_at=2026-10-05T00:24:15.815126-07:00
---- PASS: TestReportReplyTracksWorkerProgress (0.02s)
-=== RUN   TestReportFromShardWithoutBuildIs404
-    crosscheck_test.go:90: report from shard 1 (no build) -> 404 {"error":"this shard has no build in this round; submit first"}
-    crosscheck_test.go:92: report into nonexistent round 1006 -> 404 {"error":"this shard has no build in this round; submit first"}
-    crosscheck_test.go:98: [db] shard_status rows: []
---- PASS: TestReportFromShardWithoutBuildIs404 (0.02s)
-=== RUN   TestInvalidReportRejectedAndPreviousKept
-    crosscheck_test.go:128: bad report {QueueDepth:1 WaitingNeedsIndex:2 OldestWaitMs:0 BuildProgress:0 StreamDone:false} -> 400 {"error":"report fields out of range"}
-    crosscheck_test.go:128: bad report {QueueDepth:1 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:1.5 StreamDone:false} -> 400 {"error":"report fields out of range"}
-    crosscheck_test.go:128: bad report {QueueDepth:-1 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:0 StreamDone:false} -> 400 {"error":"report fields out of range"}
-    crosscheck_test.go:134: [db] shard_status: [{RoundID:7 ShardID:0 QueueDepth:3 WaitingNeedsIndex:1 OldestWaitMs:10 BuildProgress:0.5 StreamDone:false UpdatedAt:2026-10-05 00:24:15.847788 -0700 PDT}]
---- PASS: TestInvalidReportRejectedAndPreviousKept (0.02s)
-=== RUN   TestArrivalRecordedOnceAndRepeatUnchanged
-    crosscheck_test.go:149: first arrival seq=1 -> 201 {"created":true,"round_id":8,"seq":1,"shard_id":2}
-    crosscheck_test.go:157: [db] job after arrival: {RoundID:8 ShardID:2 Seq:1 DurationMs:250 NeedsIndex:true ArrivedAt:2026-10-05 00:24:15.867279 -0700 PDT StartedAt:<nil> FinishedAt:<nil>}
-    crosscheck_test.go:163: repeat arrival seq=1 with different body -> 200 {"created":false,"round_id":8,"seq":1,"shard_id":2}
-    crosscheck_test.go:168: [db] job after repeat: {RoundID:8 ShardID:2 Seq:1 DurationMs:250 NeedsIndex:true ArrivedAt:2026-10-05 00:24:15.867279 -0700 PDT StartedAt:<nil> FinishedAt:<nil>}
---- PASS: TestArrivalRecordedOnceAndRepeatUnchanged (0.02s)
-=== RUN   TestJobStartDoneStatusCodes
-    crosscheck_test.go:202: POST /jobs/9/0/2/start -> 404 {"error":"no such job"}
-         (no such query)
-    crosscheck_test.go:202: POST /jobs/9/0/2/done -> 404 {"error":"no such job"}
-         (no such query)
-    crosscheck_test.go:202: POST /jobs/9/0/1/done -> 409 {"error":"job cannot be finished: started_at=\u003cnil\u003e finished_at=\u003cnil\u003e"}
-         (done before start is the wrong state)
-    crosscheck_test.go:202: POST /jobs/9/0/1/start -> 200 {"event":"started","round_id":9,"seq":1,"shard_id":0}
-         (first start)
-    crosscheck_test.go:202: POST /jobs/9/0/1/start -> 409 {"error":"job cannot be started: started_at=2026-10-05 00:24:15.883472 -0700 PDT finished_at=\u003cnil\u003e"}
-         (already started)
-    crosscheck_test.go:202: POST /jobs/9/0/1/done -> 200 {"event":"finished","round_id":9,"seq":1,"shard_id":0}
-         (first done)
-    crosscheck_test.go:202: POST /jobs/9/0/1/done -> 409 {"error":"job cannot be finished: started_at=2026-10-05 00:24:15.883472 -0700 PDT finished_at=2026-10-05 00:24:15.884341 -0700 PDT"}
-         (already finished)
-    crosscheck_test.go:212: [db] job: {RoundID:9 ShardID:0 Seq:1 DurationMs:10 NeedsIndex:false ArrivedAt:2026-10-05 00:24:15.880949 -0700 PDT StartedAt:2026-10-05 00:24:15.883472 -0700 PDT FinishedAt:2026-10-05 00:24:15.884341 -0700 PDT}
---- PASS: TestJobStartDoneStatusCodes (0.02s)
-=== RUN   TestPreemptMovesRunningLocalToGPUQueue
-    crosscheck_test.go:226: [db] local build at submit: build_id=3:10 placement=local state=running attempt=0 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.891878-07:00 finished_at=<nil>
-    crosscheck_test.go:233: [db] after preempt: build_id=3:10 placement=gpu state=queued attempt=0 priority=7.5 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    crosscheck_test.go:243: shard report after preempt -> 200 {"build":{"build_id":"3:10","placement":"gpu","state":"queued","attempt":0}}
-    crosscheck_test.go:249: shard's late POST /builds/3:10/done -> 409 {"error":"build is gpu/queued, not a running local build"}
-    crosscheck_test.go:255: claim after preempt: {BuildID:3:10 RoundID:10 Attempt:1 NVectors:10000 Dim:64 MemBytes:1} ok=true err=<nil>
---- PASS: TestPreemptMovesRunningLocalToGPUQueue (0.01s)
-=== RUN   TestRenegeMovesQueuedGPUToLocal
-    crosscheck_test.go:268: [db] gpu build at submit: build_id=1:11 placement=gpu state=queued attempt=0 priority=0 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    crosscheck_test.go:275: [db] after renege: build_id=1:11 placement=local state=running attempt=0 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.908575-07:00 finished_at=<nil>
-    crosscheck_test.go:281: claim after renege: {BuildID: RoundID:0 Attempt:0 NVectors:0 Dim:0 MemBytes:0} ok=false err=<nil>
-    crosscheck_test.go:288: report reply after renege: {BuildID:1:11 Placement:local State:running Attempt:0}
-    crosscheck_test.go:294: POST /builds/1:11/done -> 200 {"build_id":"1:11","state":"done"}
-    crosscheck_test.go:296: [db] after /done: build_id=1:11 placement=local state=done attempt=0 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.908575-07:00 finished_at=2026-10-05T00:24:15.910917-07:00
---- PASS: TestRenegeMovesQueuedGPUToLocal (0.01s)
-=== RUN   TestTransitionsRefusedOutsideTheirGuards
-    crosscheck_test.go:321: [db] before: build_id=0:12 placement=gpu state=leased attempt=1 priority=0 lease_owner=w1 started_at=2026-10-05T00:24:15.922195-07:00 finished_at=<nil>
-    crosscheck_test.go:321: [db] before: build_id=1:12 placement=gpu state=queued attempt=0 priority=0 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    crosscheck_test.go:321: [db] before: build_id=2:12 placement=local state=done attempt=0 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.924696-07:00 finished_at=2026-10-05T00:24:15.926238-07:00
-    crosscheck_test.go:336: renege leased gpu -> ok=false err=<nil>
-    crosscheck_test.go:336: preempt leased gpu -> ok=false err=<nil>
-    crosscheck_test.go:336: preempt queued gpu -> ok=false err=<nil>
-    crosscheck_test.go:336: preempt done local -> ok=false err=<nil>
-    crosscheck_test.go:336: renege done local -> ok=false err=<nil>
-    crosscheck_test.go:343: [db] after: build_id=0:12 placement=gpu state=leased attempt=1 priority=0 lease_owner=w1 started_at=2026-10-05T00:24:15.922195-07:00 finished_at=<nil>
-    crosscheck_test.go:343: [db] after: build_id=1:12 placement=gpu state=queued attempt=0 priority=0 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    crosscheck_test.go:343: [db] after: build_id=2:12 placement=local state=done attempt=0 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:15.924696-07:00 finished_at=2026-10-05T00:24:15.926238-07:00
---- PASS: TestTransitionsRefusedOutsideTheirGuards (0.02s)
-=== RUN   TestRoundWaitsForStreamDoneThenStampsLatestFinish
-    crosscheck_test.go:384: GET /rounds/13 -> 200; finished_at=<nil>; statuses=[{RoundID:13 ShardID:0 QueueDepth:0 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:0 StreamDone:true UpdatedAt:2026-10-05 00:24:15.947927 -0700 PDT} {RoundID:13 ShardID:1 QueueDepth:0 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:0 StreamDone:false UpdatedAt:2026-10-05 00:24:15.948586 -0700 PDT}]
-    crosscheck_test.go:393: after shard 1 stream_done: GET -> 200; [db] round finished_at=2026-10-05T00:24:15.947131-07:00
-    crosscheck_test.go:410: [db] latest child finish = 2026-10-05T00:24:15.947131-07:00
---- PASS: TestRoundWaitsForStreamDoneThenStampsLatestFinish (0.08s)
-=== RUN   TestRoundStaysOpenWhileAQueryIsUnfinished
-    crosscheck_test.go:441: FinishCompleteRounds -> 0 <nil>; [db] jobs=[{RoundID:14 ShardID:0 Seq:1 DurationMs:5 NeedsIndex:true ArrivedAt:2026-10-05 00:24:16.01843 -0700 PDT StartedAt:2026-10-05 00:24:16.020841 -0700 PDT FinishedAt:<nil>} {RoundID:14 ShardID:0 Seq:2 DurationMs:5 NeedsIndex:false ArrivedAt:2026-10-05 00:24:16.019289 -0700 PDT StartedAt:2026-10-05 00:24:16.019976 -0700 PDT FinishedAt:2026-10-05 00:24:16.020541 -0700 PDT}] round.finished_at=<nil>
-    crosscheck_test.go:450: after finishing seq 1: [db] round.finished_at=2026-10-05T00:24:16.023604-07:00
---- PASS: TestRoundStaysOpenWhileAQueryIsUnfinished (0.02s)
-=== RUN   TestStreamDoneFromBuildlessShardDoesNotCount
-    crosscheck_test.go:480: ReportStatus for shard 99 (no build) -> this shard has no build in this round
-    crosscheck_test.go:487: builds for shards 0,1 done; stream_done: shard0=true shard1=false shard99(no build)=true
-    crosscheck_test.go:488: FinishCompleteRounds -> 0 <nil>; [db] shard_status=[{RoundID:15 ShardID:0 QueueDepth:0 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:0 StreamDone:true UpdatedAt:2026-10-05 00:24:16.044591 -0700 PDT} {RoundID:15 ShardID:1 QueueDepth:0 WaitingNeedsIndex:0 OldestWaitMs:0 BuildProgress:0 StreamDone:false UpdatedAt:2026-10-05 00:24:16.044987 -0700 PDT}]; round.finished_at=<nil>
---- PASS: TestStreamDoneFromBuildlessShardDoesNotCount (0.02s)
-=== RUN   TestSubmitValidationAndCap
-    crosscheck_test.go:501: POST /rounds n_shards=0 -> 400 {"error":"n_shards must be positive"}
-    crosscheck_test.go:501: POST /rounds n_shards=-3 -> 400 {"error":"n_shards must be positive"}
-    crosscheck_test.go:507: POST /builds unknown round -> 404 {"error":"no such round"}
-    crosscheck_test.go:516: third distinct shard into n_shards=2 -> 409 {"error":"round already has n_shards builds"}
-    crosscheck_test.go:522: duplicate of shard 5 into full round -> 200 {"build_id":"5:16","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":5120000,"created":false,"cpu_build_ms":825,"gpu_total_ms":2114}
-    crosscheck_test.go:527: store.SubmitBuild third shard -> err=round already has n_shards builds
-    crosscheck_test.go:532: [db] 2 builds in round
---- PASS: TestSubmitValidationAndCap (0.02s)
-=== RUN   TestConcurrentSubmitsRespectCap
-    crosscheck_test.go:559: 12 concurrent submits of distinct shards into n_shards=3: status counts map[201:3 409:9]; [db] 3 builds
---- PASS: TestConcurrentSubmitsRespectCap (0.03s)
-=== RUN   TestSubmitWithJobsFieldRejected
-    crosscheck_test.go:575: POST /builds with old-spec jobs list -> 400 {"error":"bad json: json: unknown field \"jobs\""}
-        ; [db] builds=0 jobs=0
---- PASS: TestSubmitWithJobsFieldRejected (0.01s)
-=== RUN   TestConcurrentStoreSubmitsRespectCap
-    crosscheck_test.go:618: 12 concurrent store.SubmitBuild into n_shards=3: inserted=3 ErrRoundFull=9 other=0; [db] 3 builds
---- PASS: TestConcurrentStoreSubmitsRespectCap (0.03s)
-=== RUN   TestWorkerHeartbeatsBeforeFirstClaimAndEveryInterval
-    worker_test.go:34: queued GPU build 0:20: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:36: started worker hb-worker (pid 60686) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:38: [db] after worker finished: build_id=0:20 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:16.33447-07:00 finished_at=2026-10-05T00:24:16.570298-07:00
-    worker_test.go:45: [db] workers: worker_id=hb-worker mem_bytes=4000000000 registered_at=2026-10-05T00:24:16.333295-07:00 last_seen=2026-10-05T00:24:16.338357-07:00
-    worker_test.go:46: [db] build started_at (claim time, set by now() in the claim) = 2026-10-05T00:24:16.33447-07:00
-    worker_test.go:54: first heartbeat precedes first claim, as promised
-    worker_test.go:62: [db] 1.5 s later, last_seen=2026-10-05T00:24:17.965086-07:00 (advanced 1.626729s)
-    worker_helpers_test.go:115: --- worker hb-worker stdout ---
-        {"time": "2026-10-05T07:24:16.332Z", "level": "INFO", "msg": "worker starting", "worker_id": "hb-worker", "mem_bytes": 4000000000, "builder": "fake", "lease_s": 2.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:16.334Z", "level": "INFO", "msg": "registered", "worker_id": "hb-worker"}
-        {"time": "2026-10-05T07:24:16.336Z", "level": "INFO", "msg": "claimed", "build_id": "0:20", "attempt": 1, "round_id": 20, "n_vectors": 100000, "dim": 128, "estimate_s": 0.23}
-        {"time": "2026-10-05T07:24:16.573Z", "level": "INFO", "msg": "completed", "build_id": "0:20", "attempt": 1, "round_id": 20, "kind": "fake", "index_bytes": 64000000, "elapsed_s": 0.23}
---- PASS: TestWorkerHeartbeatsBeforeFirstClaimAndEveryInterval (1.95s)
-=== RUN   TestWorkerCompletesBuildForScaledModelTime
-    worker_test.go:79: queued GPU build 0:21: n=1000000 dim=128 mem=1024000000 priority=0 modeled gpu_total=32.517394919s
-    worker_test.go:82: started worker done-worker (pid 60687) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:84: [db] final: build_id=0:21 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:18.21669-07:00 finished_at=2026-10-05T00:24:19.851225-07:00
-    worker_test.go:84: [db] final: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:18.09983-07:00
-    worker_test.go:93: finished_at - started_at = 1.634535s; modeled GPU total 32.517394919s / FAKE_TIME_SCALE 20 = 1.625869745s
-    worker_test.go:100: worker log: {"time": "2026-10-05T07:24:18.219Z", "level": "INFO", "msg": "claimed", "build_id": "0:21", "attempt": 1, "round_id": 21, "n_vectors": 1000000, "dim": 128, "estimate_s": 1.63}
-    worker_test.go:101: worker log: {"time": "2026-10-05T07:24:19.854Z", "level": "INFO", "msg": "completed", "build_id": "0:21", "attempt": 1, "round_id": 21, "kind": "fake", "index_bytes": 640000000, "elapsed_s": 1.63}
-    worker_helpers_test.go:115: --- worker done-worker stdout ---
-        {"time": "2026-10-05T07:24:18.214Z", "level": "INFO", "msg": "worker starting", "worker_id": "done-worker", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 2.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:18.216Z", "level": "INFO", "msg": "registered", "worker_id": "done-worker"}
-        {"time": "2026-10-05T07:24:18.219Z", "level": "INFO", "msg": "claimed", "build_id": "0:21", "attempt": 1, "round_id": 21, "n_vectors": 1000000, "dim": 128, "estimate_s": 1.63}
-        {"time": "2026-10-05T07:24:19.854Z", "level": "INFO", "msg": "completed", "build_id": "0:21", "attempt": 1, "round_id": 21, "kind": "fake", "index_bytes": 640000000, "elapsed_s": 1.63}
---- PASS: TestWorkerCompletesBuildForScaledModelTime (1.80s)
-=== RUN   TestWorkerTextLogFormatCarriesBuildFields
-    worker_test.go:119: queued GPU build 0:22: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:120: started worker text-worker (pid 60688) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:139: text log: 00:24:20.019 INFO  claimed build_id=0:22 attempt=1 round_id=22 n_vectors=100000 dim=128 estimate_s=0.23
-    worker_test.go:139: text log: 00:24:20.258 INFO  completed build_id=0:22 attempt=1 round_id=22 kind=fake index_bytes=64000000 elapsed_s=0.23
-    worker_helpers_test.go:115: --- worker text-worker stdout ---
-        00:24:20.015 INFO  worker starting worker_id=text-worker mem_bytes=8589934592 builder=fake lease_s=2.0 renew_interval_s=0.3
-        00:24:20.017 INFO  registered worker_id=text-worker
-        00:24:20.019 INFO  claimed build_id=0:22 attempt=1 round_id=22 n_vectors=100000 dim=128 estimate_s=0.23
-        00:24:20.258 INFO  completed build_id=0:22 attempt=1 round_id=22 kind=fake index_bytes=64000000 elapsed_s=0.23
---- PASS: TestWorkerTextLogFormatCarriesBuildFields (0.58s)
-=== RUN   TestWorkerClaimsOnlyWhatFitsItsMemory
-    worker_test.go:151: queued GPU build 0:23: n=100000 dim=128 mem=5001 priority=10 modeled gpu_total=4.639116243s
-    worker_test.go:152: queued GPU build 1:23: n=100000 dim=128 mem=5000 priority=5 modeled gpu_total=4.639116243s
-    worker_test.go:153: queued GPU build 2:23: n=100000 dim=128 mem=10 priority=1 modeled gpu_total=4.639116243s
-    worker_test.go:155: started worker small-gpu (pid 60691) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:160: [db] big (mem 5001, prio 10): build_id=0:23 placement=gpu state=queued attempt=0 priority=10 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    worker_test.go:161: [db] exact (mem 5000, prio 5): build_id=1:23 placement=gpu state=done attempt=1 priority=5 lease_owner=<nil> started_at=2026-10-05T00:24:20.61252-07:00 finished_at=2026-10-05T00:24:20.853052-07:00
-    worker_test.go:162: [db] small (mem 10, prio 1): build_id=2:23 placement=gpu state=done attempt=1 priority=1 lease_owner=<nil> started_at=2026-10-05T00:24:20.856073-07:00 finished_at=2026-10-05T00:24:21.096348-07:00
-    worker_helpers_test.go:115: --- worker small-gpu stdout ---
-        {"time": "2026-10-05T07:24:20.610Z", "level": "INFO", "msg": "worker starting", "worker_id": "small-gpu", "mem_bytes": 5000, "builder": "fake", "lease_s": 2.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:20.612Z", "level": "INFO", "msg": "registered", "worker_id": "small-gpu"}
-        {"time": "2026-10-05T07:24:20.615Z", "level": "INFO", "msg": "claimed", "build_id": "1:23", "attempt": 1, "round_id": 23, "n_vectors": 100000, "dim": 128, "estimate_s": 0.23}
-        {"time": "2026-10-05T07:24:20.856Z", "level": "INFO", "msg": "completed", "build_id": "1:23", "attempt": 1, "round_id": 23, "kind": "fake", "index_bytes": 64000000, "elapsed_s": 0.24}
-        {"time": "2026-10-05T07:24:20.858Z", "level": "INFO", "msg": "claimed", "build_id": "2:23", "attempt": 1, "round_id": 23, "n_vectors": 100000, "dim": 128, "estimate_s": 0.23}
-        {"time": "2026-10-05T07:24:21.099Z", "level": "INFO", "msg": "completed", "build_id": "2:23", "attempt": 1, "round_id": 23, "kind": "fake", "index_bytes": 64000000, "elapsed_s": 0.24}
---- PASS: TestWorkerClaimsOnlyWhatFitsItsMemory (1.15s)
-=== RUN   TestWorkerRenewKeepsLeaseAliveUnderReaper
-    worker_test.go:177: queued GPU build 0:24: n=2000000 dim=128 mem=2048000000 priority=0 modeled gpu_total=1m5.519029334s
-    worker_test.go:178: scaled build time 3.275951466s vs LEASE_SECONDS=1
-    worker_test.go:180: started worker renewer (pid 60692) with FAKE_TIME_SCALE=20 LEASE_SECONDS=1 RENEW_INTERVAL_SECONDS=0.2
-    worker_test.go:182: [db] just claimed: build_id=0:24 placement=gpu state=leased attempt=1 priority=0 lease_owner=renewer started_at=2026-10-05T00:24:21.746663-07:00 finished_at=<nil>
-    worker_test.go:182: [db] just claimed: lease_until=2026-10-05T00:24:22.746663-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:21.628866-07:00
-    worker_test.go:197: [db] final: build_id=0:24 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:21.746663-07:00 finished_at=2026-10-05T00:24:25.029223-07:00
-    worker_test.go:197: [db] final: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:21.628866-07:00
-    worker_test.go:214: lease_until advanced 15 times during the build
-    worker_helpers_test.go:115: --- worker renewer stdout ---
-        {"time": "2026-10-05T07:24:21.744Z", "level": "INFO", "msg": "worker starting", "worker_id": "renewer", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 1.0, "renew_interval_s": 0.2}
-        {"time": "2026-10-05T07:24:21.746Z", "level": "INFO", "msg": "registered", "worker_id": "renewer"}
-        {"time": "2026-10-05T07:24:21.749Z", "level": "INFO", "msg": "claimed", "build_id": "0:24", "attempt": 1, "round_id": 24, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
-        {"time": "2026-10-05T07:24:25.032Z", "level": "INFO", "msg": "completed", "build_id": "0:24", "attempt": 1, "round_id": 24, "kind": "fake", "index_bytes": 1280000000, "elapsed_s": 3.28}
---- PASS: TestWorkerRenewKeepsLeaseAliveUnderReaper (3.48s)
-=== RUN   TestWorkerKill9MidBuildAnotherWorkerCompletesOnce
-    worker_test.go:228: queued GPU build 0:25: n=2000000 dim=128 mem=2048000000 priority=0 modeled gpu_total=1m5.519029334s
-    worker_test.go:230: started worker gpu-A (pid 60693) with FAKE_TIME_SCALE=20 LEASE_SECONDS=1 RENEW_INTERVAL_SECONDS=0.2
-    worker_test.go:233: sent killed to worker gpu-A
-    worker_test.go:235: [db] after kill -9 of A: build_id=0:25 placement=gpu state=leased attempt=1 priority=0 lease_owner=gpu-A started_at=2026-10-05T00:24:25.232311-07:00 finished_at=<nil>
-    worker_test.go:235: [db] after kill -9 of A: lease_until=2026-10-05T00:24:26.861245-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:25.107711-07:00
-    worker_test.go:249: reaper returned 0:25 attempt 1 (owner gpu-A) to queued
-    worker_test.go:251: started worker gpu-B (pid 60694) with FAKE_TIME_SCALE=20 LEASE_SECONDS=1 RENEW_INTERVAL_SECONDS=0.2
-    worker_test.go:253: [db] final: build_id=0:25 placement=gpu state=done attempt=2 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:27.108145-07:00 finished_at=2026-10-05T00:24:30.392912-07:00
-    worker_test.go:253: [db] final: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:25.107711-07:00
-    worker_test.go:260: completion lines: A=0 B=1
-    worker_helpers_test.go:115: --- worker gpu-B stdout ---
-        {"time": "2026-10-05T07:24:27.106Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-B", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 1.0, "renew_interval_s": 0.2}
-        {"time": "2026-10-05T07:24:27.108Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-B"}
-        {"time": "2026-10-05T07:24:27.110Z", "level": "INFO", "msg": "claimed", "build_id": "0:25", "attempt": 2, "round_id": 25, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
-        {"time": "2026-10-05T07:24:30.395Z", "level": "INFO", "msg": "completed", "build_id": "0:25", "attempt": 2, "round_id": 25, "kind": "fake", "index_bytes": 1280000000, "elapsed_s": 3.28}
-    worker_helpers_test.go:115: --- worker gpu-A stdout ---
-        {"time": "2026-10-05T07:24:25.230Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-A", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 1.0, "renew_interval_s": 0.2}
-        {"time": "2026-10-05T07:24:25.232Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-A"}
-        {"time": "2026-10-05T07:24:25.235Z", "level": "INFO", "msg": "claimed", "build_id": "0:25", "attempt": 1, "round_id": 25, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
---- PASS: TestWorkerKill9MidBuildAnotherWorkerCompletesOnce (5.53s)
-=== RUN   TestWorkerSIGSTOPPastLeaseLosesOwnershipAndWritesNothing
-    worker_test.go:273: queued GPU build 0:26: n=2000000 dim=128 mem=2048000000 priority=0 modeled gpu_total=1m5.519029334s
-    worker_test.go:274: scaled build time 6.551902933s at FAKE_TIME_SCALE=10
-    worker_test.go:276: started worker gpu-A (pid 60695) with FAKE_TIME_SCALE=10 LEASE_SECONDS=1 RENEW_INTERVAL_SECONDS=0.2
-    worker_test.go:279: sent suspended (signal) to worker gpu-A
-    worker_test.go:298: [db] reaped and re-claimed by gpu-other while A is stopped: build_id=0:26 placement=gpu state=leased attempt=2 priority=0 lease_owner=gpu-other started_at=2026-10-05T00:24:32.327912-07:00 finished_at=<nil>
-    worker_test.go:298: [db] reaped and re-claimed by gpu-other while A is stopped: lease_until=2026-10-05T00:25:02.327912-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:30.645194-07:00
-    worker_test.go:300: sent continued to worker gpu-A
-    worker_test.go:302: worker A log: {"time": "2026-10-05T07:24:32.435Z", "level": "WARNING", "msg": "lost ownership", "build_id": "0:26", "attempt": 1, "round_id": 26, "why": "lease lost; build abandoned"}
-    worker_test.go:307: [db] after A resumed: build_id=0:26 placement=gpu state=leased attempt=2 priority=0 lease_owner=gpu-other started_at=2026-10-05T00:24:32.327912-07:00 finished_at=<nil>
-    worker_test.go:307: [db] after A resumed: lease_until=2026-10-05T00:25:02.327912-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:30.645194-07:00
-    worker_test.go:321: [db] after gpu-other completes attempt 2: build_id=0:26 placement=gpu state=done attempt=2 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:32.327912-07:00 finished_at=2026-10-05T00:24:38.993396-07:00
-    worker_test.go:323: sent terminated to worker gpu-A
-    worker_test.go:325: A exit code after SIGTERM: 0
-    worker_helpers_test.go:115: --- worker gpu-A stdout ---
-        {"time": "2026-10-05T07:24:30.762Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-A", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 1.0, "renew_interval_s": 0.2}
-        {"time": "2026-10-05T07:24:30.764Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-A"}
-        {"time": "2026-10-05T07:24:30.767Z", "level": "INFO", "msg": "claimed", "build_id": "0:26", "attempt": 1, "round_id": 26, "n_vectors": 2000000, "dim": 128, "estimate_s": 6.55}
-        {"time": "2026-10-05T07:24:32.331Z", "level": "WARNING", "msg": "renew rejected: lease lost, cancelling build", "build_id": "0:26", "attempt": 1, "round_id": 26}
-        {"time": "2026-10-05T07:24:32.435Z", "level": "WARNING", "msg": "lost ownership", "build_id": "0:26", "attempt": 1, "round_id": 26, "why": "lease lost; build abandoned"}
-        {"time": "2026-10-05T07:24:38.996Z", "level": "INFO", "msg": "shutdown requested", "why": "signal 15"}
-        {"time": "2026-10-05T07:24:38.997Z", "level": "INFO", "msg": "deregistered", "worker_id": "gpu-A"}
-        {"time": "2026-10-05T07:24:38.997Z", "level": "INFO", "msg": "worker stopped", "worker_id": "gpu-A", "builds_done": 0, "builds_lost": 1, "builds_released": 0}
---- PASS: TestWorkerSIGSTOPPastLeaseLosesOwnershipAndWritesNothing (8.41s)
-=== RUN   TestWorkerReclaimedMidBuildCancelsWithinARenewInterval
-    worker_test.go:339: queued GPU build 0:27: n=2000000 dim=128 mem=2048000000 priority=0 modeled gpu_total=1m5.519029334s
-    worker_test.go:342: started worker gpu-A (pid 60696) with FAKE_TIME_SCALE=10 LEASE_SECONDS=30 RENEW_INTERVAL_SECONDS=1
-    worker_test.go:372: [db] reaped and re-claimed by gpu-other (attempt 2) while A builds attempt 1: build_id=0:27 placement=gpu state=leased attempt=2 priority=0 lease_owner=gpu-other started_at=2026-10-05T00:24:39.672975-07:00 finished_at=<nil>
-    worker_test.go:372: [db] reaped and re-claimed by gpu-other (attempt 2) while A builds attempt 1: lease_until=2026-10-05T00:25:09.672975-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:39.051993-07:00
-    worker_test.go:376: worker A log 525.620458ms after the re-claim (RENEW_INTERVAL_SECONDS=1, build would need ~5.551902933s more): {"time": "2026-10-05T07:24:40.186Z", "level": "WARNING", "msg": "lost ownership", "build_id": "0:27", "attempt": 1, "round_id": 27, "why": "lease lost; build abandoned"}
-    worker_test.go:384: [db] one full build time later: build_id=0:27 placement=gpu state=leased attempt=2 priority=0 lease_owner=gpu-other started_at=2026-10-05T00:24:39.672975-07:00 finished_at=<nil>
-    worker_test.go:384: [db] one full build time later: lease_until=2026-10-05T00:25:09.672975-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:39.051993-07:00
-    worker_test.go:396: queued GPU build 1:27: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:402: [db] a new build queued after A lost its lease: build_id=1:27 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:46.848668-07:00 finished_at=2026-10-05T00:24:47.320278-07:00
-    worker_helpers_test.go:115: --- worker gpu-A stdout ---
-        {"time": "2026-10-05T07:24:39.144Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-A", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 30.0, "renew_interval_s": 1.0}
-        {"time": "2026-10-05T07:24:39.146Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-A"}
-        {"time": "2026-10-05T07:24:39.149Z", "level": "INFO", "msg": "claimed", "build_id": "0:27", "attempt": 1, "round_id": 27, "n_vectors": 2000000, "dim": 128, "estimate_s": 6.55}
-        {"time": "2026-10-05T07:24:40.162Z", "level": "WARNING", "msg": "renew rejected: lease lost, cancelling build", "build_id": "0:27", "attempt": 1, "round_id": 27}
-        {"time": "2026-10-05T07:24:40.186Z", "level": "WARNING", "msg": "lost ownership", "build_id": "0:27", "attempt": 1, "round_id": 27, "why": "lease lost; build abandoned"}
-        {"time": "2026-10-05T07:24:46.853Z", "level": "INFO", "msg": "claimed", "build_id": "1:27", "attempt": 1, "round_id": 27, "n_vectors": 100000, "dim": 128, "estimate_s": 0.46}
-        {"time": "2026-10-05T07:24:47.323Z", "level": "INFO", "msg": "completed", "build_id": "1:27", "attempt": 1, "round_id": 27, "kind": "fake", "index_bytes": 64000000, "elapsed_s": 0.47}
---- PASS: TestWorkerReclaimedMidBuildCancelsWithinARenewInterval (8.30s)
-=== RUN   TestWorkerSIGTERMReleasesBuildOverBudget
-    worker_test.go:415: queued GPU build 0:28: n=2000000 dim=128 mem=2048000000 priority=0 modeled gpu_total=1m5.519029334s
-    worker_test.go:416: scaled build 3.275951466s, budget 0.5 s
-    worker_test.go:418: started worker gpu-term (pid 60697) with FAKE_TIME_SCALE=20 LEASE_SECONDS=30 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:420: [db] claimed: build_id=0:28 placement=gpu state=leased attempt=1 priority=0 lease_owner=gpu-term started_at=2026-10-05T00:24:47.473199-07:00 finished_at=<nil>
-    worker_test.go:420: [db] claimed: lease_until=2026-10-05T00:25:17.473199-07:00 fail_reason=<nil> enqueued_at=2026-10-05T00:24:47.353968-07:00
-    worker_test.go:422: sent terminated to worker gpu-term
-    worker_test.go:425: [db] after SIGTERM and exit: build_id=0:28 placement=gpu state=queued attempt=1 priority=0 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    worker_test.go:425: [db] after SIGTERM and exit: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:47.353968-07:00
-    worker_test.go:426: exit code 0
-    worker_test.go:428: worker log: {"time": "2026-10-05T07:24:47.476Z", "level": "INFO", "msg": "claimed", "build_id": "0:28", "attempt": 1, "round_id": 28, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
-    worker_test.go:428: worker log: {"time": "2026-10-05T07:24:48.199Z", "level": "INFO", "msg": "cancelling current build to release it", "build_id": "0:28", "attempt": 1, "round_id": 28, "remaining_s": 2.65, "budget_s": 0.5}
-    worker_test.go:428: worker log: {"time": "2026-10-05T07:24:48.207Z", "level": "INFO", "msg": "released back to queue", "build_id": "0:28", "attempt": 1, "round_id": 28, "why": "build 0:28 attempt 1 cancelled at 22%"}
-    worker_helpers_test.go:115: --- worker gpu-term stdout ---
-        {"time": "2026-10-05T07:24:47.470Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-term", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 30.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:47.473Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-term"}
-        {"time": "2026-10-05T07:24:47.476Z", "level": "INFO", "msg": "claimed", "build_id": "0:28", "attempt": 1, "round_id": 28, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
-        {"time": "2026-10-05T07:24:48.198Z", "level": "INFO", "msg": "shutdown requested", "why": "signal 15"}
-        {"time": "2026-10-05T07:24:48.199Z", "level": "INFO", "msg": "cancelling current build to release it", "build_id": "0:28", "attempt": 1, "round_id": 28, "remaining_s": 2.65, "budget_s": 0.5}
-        {"time": "2026-10-05T07:24:48.207Z", "level": "INFO", "msg": "released back to queue", "build_id": "0:28", "attempt": 1, "round_id": 28, "why": "build 0:28 attempt 1 cancelled at 22%"}
-        {"time": "2026-10-05T07:24:48.208Z", "level": "INFO", "msg": "deregistered", "worker_id": "gpu-term"}
-        {"time": "2026-10-05T07:24:48.208Z", "level": "INFO", "msg": "worker stopped", "worker_id": "gpu-term", "builds_done": 0, "builds_lost": 0, "builds_released": 1}
---- PASS: TestWorkerSIGTERMReleasesBuildOverBudget (0.91s)
-=== RUN   TestWorkerSIGTERMFinishesBuildWithinBudgetAndStopsClaiming
-    worker_test.go:452: queued GPU build 0:29: n=2000000 dim=128 mem=2048000000 priority=10 modeled gpu_total=1m5.519029334s
-    worker_test.go:453: queued GPU build 1:29: n=100000 dim=128 mem=102400000 priority=1 modeled gpu_total=4.639116243s
-    worker_test.go:454: scaled build 3.275951466s, default budget 5 s
-    worker_test.go:456: started worker gpu-term (pid 60698) with FAKE_TIME_SCALE=20 LEASE_SECONDS=30 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:460: sent terminated to worker gpu-term
-    worker_test.go:462: exited 2.807581166s after SIGTERM with code 0
-    worker_test.go:465: [db] build in progress at SIGTERM: build_id=0:29 placement=gpu state=done attempt=1 priority=10 lease_owner=<nil> started_at=2026-10-05T00:24:48.363879-07:00 finished_at=2026-10-05T00:24:51.648162-07:00
-    worker_test.go:465: [db] build in progress at SIGTERM: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:48.265504-07:00
-    worker_test.go:466: [db] second queued build: build_id=1:29 placement=gpu state=queued attempt=0 priority=1 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    worker_test.go:466: [db] second queued build: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:48.269838-07:00
-    worker_helpers_test.go:115: --- worker gpu-term stdout ---
-        {"time": "2026-10-05T07:24:48.362Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-term", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 30.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:48.364Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-term"}
-        {"time": "2026-10-05T07:24:48.366Z", "level": "INFO", "msg": "claimed", "build_id": "0:29", "attempt": 1, "round_id": 29, "n_vectors": 2000000, "dim": 128, "estimate_s": 3.28}
-        {"time": "2026-10-05T07:24:48.884Z", "level": "INFO", "msg": "shutdown requested", "why": "signal 15"}
-        {"time": "2026-10-05T07:24:48.884Z", "level": "INFO", "msg": "finishing current build before exit", "build_id": "0:29", "attempt": 1, "round_id": 29, "remaining_s": 2.86, "budget_s": 5}
-        {"time": "2026-10-05T07:24:51.651Z", "level": "INFO", "msg": "completed", "build_id": "0:29", "attempt": 1, "round_id": 29, "kind": "fake", "index_bytes": 1280000000, "elapsed_s": 3.28}
-        {"time": "2026-10-05T07:24:51.653Z", "level": "INFO", "msg": "deregistered", "worker_id": "gpu-term"}
-        {"time": "2026-10-05T07:24:51.653Z", "level": "INFO", "msg": "worker stopped", "worker_id": "gpu-term", "builds_done": 1, "builds_lost": 0, "builds_released": 0}
---- PASS: TestWorkerSIGTERMFinishesBuildWithinBudgetAndStopsClaiming (3.44s)
-=== RUN   TestWorkerBadConfigIsRefusedBeforeAnyClaim
-    worker_test.go:488: queued GPU build 0:30: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:490: started worker gpu-badcfg (pid 60699) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:501: worker exited with code 2; last stderr line: bad config: COST_BANDWIDTH must be positive
-    worker_test.go:509: [db] after the refused start: build_id=0:30 placement=gpu state=queued attempt=0 priority=0 lease_owner=<nil> started_at=<nil> finished_at=<nil>
-    worker_test.go:509: [db] after the refused start: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:51.708116-07:00
-    worker_helpers_test.go:115: --- worker gpu-badcfg stdout ---
-    worker_helpers_test.go:117: --- worker gpu-badcfg stderr ---
-        bad config: COST_BANDWIDTH must be positive
---- PASS: TestWorkerBadConfigIsRefusedBeforeAnyClaim (0.13s)
-=== RUN   TestWorkerBuildErrorRecordsFailWithReason
-    worker_test.go:524: queued GPU build 0:31: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:525: queued GPU build 1:31: n=100000 dim=128 mem=102400000 priority=0 modeled gpu_total=4.639116243s
-    worker_test.go:527: started worker gpu-err (pid 60700) with FAKE_TIME_SCALE=20 LEASE_SECONDS=2 RENEW_INTERVAL_SECONDS=0.3
-    worker_test.go:537: [db] the injected-failure build: build_id=0:31 placement=gpu state=failed attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:51.91197-07:00 finished_at=2026-10-05T00:24:52.128813-07:00
-    worker_test.go:537: [db] the injected-failure build: lease_until=<nil> fail_reason=RuntimeError: injected failure for 0:31 (FAKE_FAIL_BUILD_IDS) enqueued_at=2026-10-05T00:24:51.837791-07:00
-    worker_test.go:538: [db] the other build: build_id=1:31 placement=gpu state=done attempt=1 priority=0 lease_owner=<nil> started_at=2026-10-05T00:24:52.131076-07:00 finished_at=2026-10-05T00:24:52.370739-07:00
-    worker_test.go:538: [db] the other build: lease_until=<nil> fail_reason=<nil> enqueued_at=2026-10-05T00:24:51.840991-07:00
-    worker_helpers_test.go:115: --- worker gpu-err stdout ---
-        {"time": "2026-10-05T07:24:51.910Z", "level": "INFO", "msg": "worker starting", "worker_id": "gpu-err", "mem_bytes": 8589934592, "builder": "fake", "lease_s": 2.0, "renew_interval_s": 0.3}
-        {"time": "2026-10-05T07:24:51.912Z", "level": "INFO", "msg": "registered", "worker_id": "gpu-err"}
-        {"time": "2026-10-05T07:24:51.914Z", "level": "INFO", "msg": "claimed", "build_id": "0:31", "attempt": 1, "round_id": 31, "n_vectors": 100000, "dim": 128, "estimate_s": 0.23}
-        {"time": "2026-10-05T07:24:52.124Z", "level": "ERROR", "msg": "build failed", "build_id": "0:31", "attempt": 1, "round_id": 31, "exc": "Traceback (most recent call last):\n  File \"/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/worker.py\", line 151, in _work\n    artifact = self.builder.build(job, progress, cur.cancel)\n  File \"/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/builder.py\", line 78, in build\n    raise RuntimeError(f\"injected failure for {job.build_id} (FAKE_FAIL_BUILD_IDS)\")\nRuntimeError: injected failure for 0:31 (FAKE_FAIL_BUILD_IDS)"}
-        {"time": "2026-10-05T07:24:52.131Z", "level": "INFO", "msg": "marked failed", "build_id": "0:31", "attempt": 1, "round_id": 31, "reason": "RuntimeError: injected failure for 0:31 (FAKE_FAIL_BUILD_IDS)"}
-        {"time": "2026-10-05T07:24:52.133Z", "level": "INFO", "msg": "claimed", "build_id": "1:31", "attempt": 1, "round_id": 31, "n_vectors": 100000, "dim": 128, "estimate_s": 0.23}
-        {"time": "2026-10-05T07:24:52.373Z", "level": "INFO", "msg": "completed", "build_id": "1:31", "attempt": 1, "round_id": 31, "kind": "fake", "index_bytes": 64000000, "elapsed_s": 0.23}
---- PASS: TestWorkerBuildErrorRecordsFailWithReason (0.56s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/crosscheck	36.974s
-=== RUN   TestAlwaysGPU
-    policy_test.go:19: fits                                          -> gpu   (always_gpu)
-    policy_test.go:19: exactly fits                                  -> gpu   (always_gpu)
-    policy_test.go:19: too big for every live worker                 -> local (needs 17179869184 bytes, largest live worker has 8589934592)
-    policy_test.go:19: no live workers: still queue (pool may be cold) -> gpu   (always_gpu)
---- PASS: TestAlwaysGPU (0.00s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/policy	(cached)
-?   	github.com/arqbca11/KubernetesGPU/scheduler/reaper	[no test files]
-=== RUN   TestClaimOrdersByPriorityThenAge
-    store_test.go:117: submitted build 1:32: placement=gpu priority=1 mem=1048576
-    store_test.go:118: submitted build 2:32: placement=gpu priority=5 mem=1048576
-    store_test.go:119: submitted build 3:32: placement=gpu priority=3 mem=1048576
-    store_test.go:130: claim #1 by worker w -> 2:32 (attempt 1)
-    store_test.go:130: claim #2 by worker w -> 3:32 (attempt 1)
-    store_test.go:130: claim #3 by worker w -> 1:32 (attempt 1)
-    store_test.go:139: order was [2:32 3:32 1:32]: priority 5, then 3, then 1, as expected
-    store_test.go:143: claim #4 on the empty queue -> nothing, as expected
---- PASS: TestClaimOrdersByPriorityThenAge (0.03s)
-=== RUN   TestConcurrentClaimsNeverShareABuild
-    store_test.go:157: submitted 20 gpu builds, all priority 0
-    store_test.go:158: starting 8 workers that claim in a loop until the queue is empty
-    store_test.go:191: all 20 builds claimed, each exactly once: FOR UPDATE SKIP LOCKED kept the workers apart
---- PASS: TestConcurrentClaimsNeverShareABuild (0.05s)
-=== RUN   TestFencingAfterReap
-    store_test.go:199: submitted build 1:34: placement=gpu priority=0 mem=1048576
-    store_test.go:205: worker-1 claims -> attempt 1, lease 30s
-    store_test.go:206:   [db] build 1:34: placement=gpu state=leased  attempt=1 lease_owner=worker-1 lease_expires_in=30s
-    store_test.go:213: reaper runs while the lease is live -> 0 rows changed
-    store_test.go:216: worker-1 stops renewing (kill -9, or SIGSTOP)
-    store_test.go:217:   (test) forced lease of 1:34 into the past, as if the worker had stopped renewing
-    store_test.go:218:   [db] build 1:34: placement=gpu state=leased  attempt=1 lease_owner=worker-1 lease_expires_in=-1s
-    store_test.go:67:   [reaper] build 1:34 attempt 1 (was leased to worker-1) -> queued
-    store_test.go:223: reaper runs after expiry -> 1 row back to queued
-    store_test.go:227:   [db] build 1:34: placement=gpu state=queued  attempt=1 lease_owner=- lease_expires_in=-
-    store_test.go:233: reaper runs again -> 0 rows changed (idempotent)
-    store_test.go:239: worker-2 claims -> attempt 2 (the fencing token moved on)
-    store_test.go:240:   [db] build 1:34: placement=gpu state=leased  attempt=2 lease_owner=worker-2 lease_expires_in=30s
-    store_test.go:243: worker-1 wakes up (SIGCONT) still holding attempt 1 and tries to carry on:
-    store_test.go:248:   renew(attempt 1)    -> rejected (0 rows)
-    store_test.go:253:   complete(attempt 1) -> rejected (0 rows)
-    store_test.go:258:   fail(attempt 1)     -> rejected (0 rows)
-    store_test.go:262:   [db] build 1:34: placement=gpu state=leased  attempt=2 lease_owner=worker-2 lease_expires_in=30s
-    store_test.go:269: worker-2 renew(attempt 2)    -> accepted
-    store_test.go:274: worker-2 complete(attempt 2) -> accepted
-    store_test.go:278:   [db] build 1:34: placement=gpu state=done    attempt=2 lease_owner=- lease_expires_in=-
-    store_test.go:284: worker-2 completes again       -> rejected (already done)
-    store_test.go:289: reaper runs on the done build -> 0 rows changed
-    store_test.go:290: result: the build finished exactly once, by worker-2
---- PASS: TestFencingAfterReap (0.02s)
-=== RUN   TestReleaseReturnsToQueueAndFences
-    store_test.go:297: submitted build 1:35: placement=gpu priority=0 mem=1048576
-    store_test.go:300: w1 claims -> attempt 1
-    store_test.go:304: w1 gets SIGTERM and releases the build instead of finishing
-    store_test.go:308:   [db] build 1:35: placement=gpu state=queued  attempt=1 lease_owner=- lease_expires_in=-
-    store_test.go:313: w2 claims -> attempt 2
-    store_test.go:317: w1 complete(attempt 1) -> rejected
---- PASS: TestReleaseReturnsToQueueAndFences (0.01s)
-=== RUN   TestClaimRespectsWorkerMemory
-    store_test.go:324: submitted build 1:36: placement=gpu priority=10 mem=17179869184
-    store_test.go:325: submitted build 2:36: placement=gpu priority=0 mem=1073741824
-    store_test.go:332: 8 GiB worker claims -> 2:36 (skipped the 16 GiB build that was first in line)
-    store_test.go:337: 24 GiB worker claims -> 1:36
---- PASS: TestClaimRespectsWorkerMemory (0.01s)
-=== RUN   TestDuplicateSubmitIsNoop
-    store_test.go:348: submitted 1:37 as gpu, priority 7
-    store_test.go:350: worker claims it -> attempt 1
-    store_test.go:351:   [db] build 1:37: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
-    store_test.go:359: shard resubmits the same build_id as local, priority 99 -> inserted=false
-    store_test.go:367:   [db] build 1:37: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
-    store_test.go:368: row unchanged: still gpu, priority 7, leased to the worker
---- PASS: TestDuplicateSubmitIsNoop (0.01s)
-=== RUN   TestLocalBuildsAreNeverReaped
-    store_test.go:375: submitted build 1:38: placement=local priority=0 mem=1048576
-    store_test.go:379:   [db] build 1:38: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
-    store_test.go:383: a worker tries to claim -> nothing (local builds are not in the queue)
-    store_test.go:388: reaper runs -> 0 rows changed (local builds have no lease)
-    store_test.go:392: shard reports the local build done -> accepted
-    store_test.go:396: shard reports it again -> rejected
-    store_test.go:397:   [db] build 1:38: placement=local state=done    attempt=0 lease_owner=- lease_expires_in=-
---- PASS: TestLocalBuildsAreNeverReaped (0.01s)
-=== RUN   TestHeartbeatAndPoolState
-    store_test.go:407: no workers registered -> pool is empty
-    store_test.go:410: workers a (8 GiB) and b (24 GiB) heartbeat
-    store_test.go:415: pool within 1 minute -> 2 live, largest 24 GiB
-    store_test.go:418:   (test) b's last_seen pushed 10 minutes into the past, as if it had died
-    store_test.go:423: pool within 1 minute -> 1 live, largest 8 GiB (b no longer counts)
---- PASS: TestHeartbeatAndPoolState (0.01s)
-=== RUN   TestRoundFinishesOnlyWhenEveryShardIsDone
-    store_test.go:438: round expects 2 shards (decision 30: done = all builds terminal, all shards stream_done, all queries finished)
-    store_test.go:442: shard 1 submits a gpu build; two queries arrive at it over time
-    store_test.go:461: nothing done yet                                               -> rounds stamped: 0, round is open
-    store_test.go:461: shard 1 build done, queries finished, stream_done; shard 2 absent -> rounds stamped: 0, round is open
-    store_test.go:461: shard 2 submits a local build, one query waiting, stream not done -> rounds stamped: 0, round is open
-    store_test.go:461: shard 2 build done, query finished, but stream NOT reported done -> rounds stamped: 0, round is open
-    store_test.go:461: shard 2 reports stream_done with an empty queue                -> rounds stamped: 1, round is finished
-    store_test.go:461: run again                                                      -> rounds stamped: 0, round is finished
-    store_test.go:504: round finished_at equals the last query's finished_at, not the time of the stream_done report
---- PASS: TestRoundFinishesOnlyWhenEveryShardIsDone (0.02s)
-=== RUN   TestPreemptAndRenegeTransitions
-    store_test.go:514: submitted build 1:40: placement=local priority=0 mem=1048576
-    store_test.go:515:   [db] build 1:40: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
-    store_test.go:517: decision 31: preempt a running local build to the gpu queue
-    store_test.go:521:   [db] build 1:40: placement=gpu state=queued  attempt=0 lease_owner=- lease_expires_in=-
-    store_test.go:530: preempting again -> rejected (not running/local any more)
-    store_test.go:534: the shard, unaware, reports its local build done -> rejected: that is how it learns
-    store_test.go:536: renege the queued gpu build back to local
-    store_test.go:540:   [db] build 1:40: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
-    store_test.go:544: a worker tries to claim -> nothing; the build is local again
-    store_test.go:546: a leased build is never moved
-    store_test.go:552:   [db] build 1:40: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
-    store_test.go:556: renege on a leased build -> rejected; attempt is 1, bumped by the claim, untouched by the moves
---- PASS: TestPreemptAndRenegeTransitions (0.02s)
-=== RUN   TestSchemaRefusesOrphanShardRows
-    store_test.go:563: submitted build 1:41: placement=gpu priority=0 mem=1048576
-    store_test.go:564: decision 33 / migration 0004: shard_status and shard_jobs reference builds (round_id, shard_id)
-    store_test.go:569: raw INSERT into shard_status for shard 99 (no build) -> ERROR: insert or update on table "shard_status" violates foreign key constraint "shard_status_build_fk" (SQLSTATE 23503)
-    store_test.go:574: raw INSERT into shard_jobs for shard 99 (no build)   -> ERROR: insert or update on table "shard_jobs" violates foreign key constraint "shard_jobs_build_fk" (SQLSTATE 23503)
-    store_test.go:580: raw INSERT of a second build for shard 1 in the round -> ERROR: duplicate key value violates unique constraint "builds_round_shard_unique" (SQLSTATE 23505)
-    store_test.go:592: ReportStatus and RecordArrival for shard 99 -> ErrNoBuild (mapped from SQLSTATE 23503)
-    store_test.go:596: ReportStatus for shard 1 (has a build) -> ok
---- PASS: TestSchemaRefusesOrphanShardRows (0.01s)
-=== RUN   TestReapFailsBuildAfterRetryBudget
-    store_test.go:606: submitted build 1:42: placement=gpu priority=0 mem=1048576
-    store_test.go:607: submitted build 2:42: placement=gpu priority=0 mem=1048576
-    store_test.go:609: MAX_ATTEMPTS=3; the poison build kills every worker that claims it (no fail, no complete, lease just expires)
-    store_test.go:616: worker-1 claims 1:42 -> attempt 1, then dies
-    store_test.go:617:   (test) forced lease of 1:42 into the past, as if the worker had stopped renewing
-    store_test.go:618:   [reaper] build 1:42 attempt 1 (was leased to worker-1) -> queued
-    store_test.go:616: worker-2 claims 1:42 -> attempt 2, then dies
-    store_test.go:617:   (test) forced lease of 1:42 into the past, as if the worker had stopped renewing
-    store_test.go:618:   [reaper] build 1:42 attempt 2 (was leased to worker-2) -> queued
-    store_test.go:616: worker-3 claims 1:42 -> attempt 3, then dies
-    store_test.go:617:   (test) forced lease of 1:42 into the past, as if the worker had stopped renewing
-    store_test.go:618:   [reaper] build 1:42 attempt 3 (was leased to worker-3) -> failed
-    store_test.go:632:   [db] 1:42: failed, reason="lease expired on attempt 3 of 3: retry budget exhausted"
-    store_test.go:633:   [db] build 1:42: placement=gpu state=failed  attempt=3 lease_owner=- lease_expires_in=-
-    store_test.go:637: the poison build is parked as failed; the queue is clear of it
-    store_test.go:643: worker-4 claims -> 2:42: the pool is working again
-    store_test.go:646:   (test) forced lease of 2:42 into the past, as if the worker had stopped renewing
-    store_test.go:647:   [reaper] build 2:42 attempt 1 (was leased to worker-4) -> queued
-    store_test.go:651: MAX_ATTEMPTS=0 disables the budget: an expired lease is requeued regardless of attempt
---- PASS: TestReapFailsBuildAfterRetryBudget (0.02s)
-=== RUN   TestConcurrentDuplicateIntoLastSlotIsNoop
-    store_test.go:686: trial 0: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
-    store_test.go:686: trial 1: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
-    store_test.go:686: trial 2: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
-    store_test.go:686: trial 3: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
-    store_test.go:686: trial 4: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
-    store_test.go:696: every losing twin was recognised as a duplicate (invariant 6), none was refused as 'round full'
---- PASS: TestConcurrentDuplicateIntoLastSlotIsNoop (0.04s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/store	0.775s
-== pytest (worker/)
-============================= test session starts ==============================
-platform darwin -- Python 3.14.7, pytest-8.4.2, pluggy-1.6.0 -- /Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/.venv/bin/python
-cachedir: .pytest_cache
-rootdir: /Users/ruoqibai/Desktop/Career/KubernetesGPU/worker
-configfile: pyproject.toml
-testpaths: tests
-collecting ... collected 15 items
+ok  	github.com/arqbca11/KubernetesGPU/experiments/workload	0.398s
 
-tests/test_costmodel.py::test_matches_go_defaults PASSED                 [  6%]
-tests/test_costmodel.py::test_env_overrides PASSED                       [ 13%]
-tests/test_store.py::test_claim_order_and_attempt PASSED                 [ 20%]
-tests/test_store.py::test_fencing_after_reap PASSED                      [ 26%]
-tests/test_store.py::test_memory_filter_and_release PASSED               [ 33%]
-tests/test_store.py::test_heartbeat_upsert PASSED                        [ 40%]
-tests/test_worker.py::test_worker_claims_builds_completes PASSED         [ 46%]
-tests/test_worker.py::test_lease_lost_mid_build_abandons_without_completing PASSED [ 53%]
-tests/test_worker.py::test_sigterm_releases_long_build_and_finishes_short_one PASSED [ 60%]
-tests/test_worker.py::test_two_workers_never_share_a_build PASSED        [ 66%]
-tests/test_worker.py::test_registers_before_first_claim PASSED           [ 73%]
-tests/test_worker.py::test_build_error_marks_failed_with_reason_and_worker_continues PASSED [ 80%]
-tests/test_worker.py::test_bad_config_is_refused_before_connecting PASSED [ 86%]
-tests/test_worker.py::test_survives_lost_database_connections_mid_build PASSED [ 93%]
-tests/test_worker.py::test_renew_outage_past_lease_deadline_assumes_lost PASSED [100%]
-
-==================================== PASSES ====================================
-___________________________ test_matches_go_defaults ___________________________
------------------------------ Captured stdout call -----------------------------
-100k x 128: cpu=20.631s gpu_total=4.639s mem=102400000
-_________________________ test_claim_order_and_attempt _________________________
------------------------------ Captured stdout call -----------------------------
-claim #1 -> Claimed(build_id='2:48', round_id=48, attempt=1, n_vectors=100000, dim=128, mem_bytes=1048576)
-claim #2 -> Claimed(build_id='1:48', round_id=48, attempt=1, n_vectors=100000, dim=128, mem_bytes=1048576)
-claim #3 on the empty queue -> None
-___________________________ test_fencing_after_reap ____________________________
------------------------------ Captured stdout call -----------------------------
-worker-1 claims -> attempt 1
-  [db] build 1:49: {'state': 'leased', 'attempt': 1, 'lease_owner': 'worker-1', 'placement': 'gpu', 'lease_left_s': 30}
-worker-1 goes silent; the lease expires; the scheduler's reaper runs
-  [db] build 1:49: {'state': 'queued', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-worker-2 claims -> attempt 2
-  [db] build 1:49: {'state': 'leased', 'attempt': 2, 'lease_owner': 'worker-2', 'placement': 'gpu', 'lease_left_s': 30}
-worker-1 wakes up holding attempt 1:
-  renew(1)    -> rejected
-  complete(1) -> rejected
-  fail(1)     -> rejected
-  release(1)  -> rejected
-  [db] build 1:49: {'state': 'leased', 'attempt': 2, 'lease_owner': 'worker-2', 'placement': 'gpu', 'lease_left_s': 30}
-worker-2 renew(2), complete(2) -> accepted
-  [db] build 1:49: {'state': 'done', 'attempt': 2, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-worker-2 complete(2) again -> rejected (already done)
-________________________ test_memory_filter_and_release ________________________
------------------------------ Captured stdout call -----------------------------
-8 GiB worker skipped the 16 GiB build and took 2:50
-released it
-re-claimed -> attempt 2
-____________________________ test_heartbeat_upsert _____________________________
------------------------------ Captured stdout call -----------------------------
-two heartbeats, one row, capacity updated
-_____________________ test_worker_claims_builds_completes ______________________
------------------------------ Captured stdout call -----------------------------
-two queued builds; one worker; fake builds take ~0.09 s each at 50x
-  [db] build 1:51: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:51: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] workers: [('gpu-1', 8589934592)]
-worker exited cleanly; builds_done=2 builds_lost=0
-____________ test_lease_lost_mid_build_abandons_without_completing _____________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:52: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:52: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-slow', 'placement': 'gpu', 'lease_left_s': 2}
-worker claimed (attempt 1) and is building
-the scheduler's reaper decides the lease expired, and another worker claims attempt 2
-  [db] build 1:52: {'state': 'leased', 'attempt': 2, 'lease_owner': 'gpu-other', 'placement': 'gpu', 'lease_left_s': 30}
-  [db] build 1:52: {'state': 'leased', 'attempt': 2, 'lease_owner': 'gpu-other', 'placement': 'gpu', 'lease_left_s': 30}
-worker's renew was rejected; it cancelled its build and left the row to gpu-other
------------------------------- Captured log call -------------------------------
-WARNING  kgpu.worker:worker.py:263 renew rejected: lease lost, cancelling build
-WARNING  kgpu.worker:worker.py:228 lost ownership
-___________ test_sigterm_releases_long_build_and_finishes_short_one ____________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:53: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:53: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-term', 'placement': 'gpu', 'lease_left_s': 2}
-SIGTERM arrives with ~0.8 s of build left and a 0.2 s finish budget
-  [db] build 1:53: {'state': 'queued', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-the build went back to the queue immediately (no waiting for the reaper), attempt unchanged; counted as released, not lost
-the worker deregistered itself on the clean exit: pool state no longer counts it
-  [db] build 2:53: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:53: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-term2', 'placement': 'gpu', 'lease_left_s': 2}
-SIGTERM arrives with the short build mid-flight and a generous budget
-  [db] build 2:53: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-the short build was finished before exit
-_____________________ test_two_workers_never_share_a_build _____________________
------------------------------ Captured stdout call -----------------------------
-12 builds, 2 workers: gpu-a did 6, gpu-b did 6, every attempt is 1
-______________________ test_registers_before_first_claim _______________________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:55: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:55: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-first', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] registered_at=07:24:55.564764 claim started_at=07:24:55.566658
-________ test_build_error_marks_failed_with_reason_and_worker_continues ________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:56: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:56: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:56: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:56: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:56: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:56: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:56: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:56: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:56: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:56: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:56: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] 1:56: failed, reason='RuntimeError: injected failure for 1:56 (FAKE_FAIL_BUILD_IDS)'
-  [db] build 1:56: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  the worker kept going and completed 2:56; the process did not crash
------------------------------- Captured log call -------------------------------
-ERROR    kgpu.worker:worker.py:156 build failed
-Traceback (most recent call last):
-  File "/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/worker.py", line 151, in _work
-    artifact = self.builder.build(job, progress, cur.cancel)
-  File "/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/builder.py", line 78, in build
-    raise RuntimeError(f"injected failure for {job.build_id} (FAKE_FAIL_BUILD_IDS)")
-RuntimeError: injected failure for 1:56 (FAKE_FAIL_BUILD_IDS)
-_________________ test_bad_config_is_refused_before_connecting _________________
------------------------------ Captured stdout call -----------------------------
-  {'COST_BANDWIDTH': '0'} -> ConfigError(COST_BANDWIDTH must be positive)
-  {'LEASE_SECONDS': '5', 'RENEW_INTERVAL_SECONDS': '5'} -> ConfigError(RENEW_INTERVAL_SECONDS must be less than LEASE_SECONDS)
-  {'FAKE_TIME_SCALE': '-1'} -> ConfigError(FAKE_TIME_SCALE must be positive)
-  {'COST_A': 'fast'} -> ConfigError(COST_* value is not a number (could not convert string to float: 'fast'))
-  {'LOG_FORMAT': 'yaml'} -> ConfigError(LOG_FORMAT must be json or text)
-______________ test_survives_lost_database_connections_mid_build _______________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:57: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-worker claimed and is building; now every one of its connections is killed server-side
-  terminated 3 backend connections (main, renewer, heartbeat)
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 1:57: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:57: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 2:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 2:57: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
-  [db] build 2:57: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-reconnected on every thread, renewed in time, completed attempt 1, then claimed and completed the next build
------------------------------- Captured log call -------------------------------
-WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
-WARNING  kgpu.worker:worker.py:279 postgres unavailable during heartbeat, reconnecting
-WARNING  kgpu.worker:worker.py:220 postgres unavailable during complete, reconnecting
-______________ test_renew_outage_past_lease_deadline_assumes_lost ______________
------------------------------ Captured stdout call -----------------------------
-  [db] build 1:58: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 1:58: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-blackout', 'placement': 'gpu', 'lease_left_s': 1}
-renews failed for longer than the lease: the worker assumed the lease lost and cancelled the build
-  [db] build 1:58: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-blackout', 'placement': 'gpu', 'lease_left_s': 0}
------------------------------- Captured log call -------------------------------
-WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
-WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
-WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
-WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
-WARNING  kgpu.worker:worker.py:248 renew failing past the lease deadline: assuming the lease is lost, cancelling build
-WARNING  kgpu.worker:worker.py:228 lost ownership
-=========================== short test summary info ============================
-PASSED tests/test_costmodel.py::test_matches_go_defaults
-PASSED tests/test_costmodel.py::test_env_overrides
-PASSED tests/test_store.py::test_claim_order_and_attempt
-PASSED tests/test_store.py::test_fencing_after_reap
-PASSED tests/test_store.py::test_memory_filter_and_release
-PASSED tests/test_store.py::test_heartbeat_upsert
-PASSED tests/test_worker.py::test_worker_claims_builds_completes
-PASSED tests/test_worker.py::test_lease_lost_mid_build_abandons_without_completing
-PASSED tests/test_worker.py::test_sigterm_releases_long_build_and_finishes_short_one
-PASSED tests/test_worker.py::test_two_workers_never_share_a_build
-PASSED tests/test_worker.py::test_registers_before_first_claim
-PASSED tests/test_worker.py::test_build_error_marks_failed_with_reason_and_worker_continues
-PASSED tests/test_worker.py::test_bad_config_is_refused_before_connecting
-PASSED tests/test_worker.py::test_survives_lost_database_connections_mid_build
-PASSED tests/test_worker.py::test_renew_outage_past_lease_deadline_assumes_lost
-============================== 15 passed in 7.79s ==============================
-
-== Docker events for container kgpu-test-pg-60650
-  00:24:12  create
-  00:24:12  start
-  00:25:01  kill
-  00:25:01  die
-  00:25:02  destroy
+== Docker events for container kgpu-test-pg-62784
+  02:50:54  create
+  02:50:54  start
+  02:50:56  kill
+  02:50:56  die
+  02:50:56  destroy
 
 == Result: PASS

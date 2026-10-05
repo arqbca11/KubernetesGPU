@@ -383,6 +383,31 @@ What the script does and what it showed (2026-10-05 run):
 
 All four roadmap failure tests pass on the Compose stack. Step 6 repeats them with the shard simulator generating the load, and step 7 at 50 shards.
 
+### Step 5: shard simulator and workload generator (done 2026-10-05)
+
+| Path | What |
+| --- | --- |
+| `experiments/workload/workload.go` | The contract: `Workload`, `ShardWorkload`, `Query` (`Kind`, `ClusterQueryID`, `NeedsIndex`), `Scenario` and its four knobs, `Validate` (decisions 51, 52). Project-owned. |
+| `experiments/workload/generate.go`, `presets.go`, `DESIGN.md` | The generator, written by an independent agent on Opus from the roadmap and the modeling assumptions alone. Poisson cluster-level arrivals split into fan-out pieces (uniform width in [2, n], correlated log-normal durations) or routed single-shard queries; rare long local DDL; `NeedsIndex` drawn per cluster query; Zipf sizes by rank; bimodal with a fit boundary at 0.9 Max; staggered DDL spread evenly; per-shard utilisation held constant across 6 and 50 shards. Six presets. Choices and references (TPC-C, YCSB, Citus, Elasticsearch kNN) in its `DESIGN.md`. 13 tests. |
+| `shard/client` | The shard's HTTP client. |
+| `shard/sim` | `Shard` (decisions 53 to 55), `RunRound`, `Timeline` (decision 56). |
+| `shard/cmd/shardsim` | The binary: env config, `PRINT_WORKLOAD=1` to inspect a workload, rounds loop, JSON timelines to `TIMELINE_DIR`. |
+| `shard/Dockerfile`, `deploy/compose.yaml` (`shards` service) | Distroless image; the `/timelines` directory is created nonroot-owned so the named volume inherits it. |
+| `scripts/compose-round.sh` | Runs one or more rounds on the stack and saves the timeline and service logs as a step log. |
+
+**First real round on the stack (2026-10-05, `test-logs/phase1/step5-compose-round.log`).** Skewed preset, 6 shards (sizes 33k to 200k), 2 workers, 10x time scale: 3,412 shard-level queries (1,792 cluster queries, 30% fan-out) over a 30 s modeled horizon. All six builds went to the GPU under policy v0 and finished at attempt 1 within 1.7 s real (17 s modeled); the round finished at 32.6 s modeled, set by the query horizon, with a straggler lag of 0.25 s. Fan-out latency p50 0.4 s, p99 1.9 s modeled; single-shard p50 0.1 s, p99 1.7 s. At 10x the scheduler took roughly 1,000 HTTP calls per second (three per query) without complaint; step 7's 50-shard round will multiply that by eight, which is the capacity question the generator agent raised.
+
+**Open questions from the generator agent**, for the owner (recorded here, not decided):
+
+1. Should `NeedsIndex` be tied to fan-out, as an unfiltered vector search scatters to every shard? Today it is drawn per cluster query, independent of fan-out.
+2. Should `downstream_heavy`'s "mostly needs the index" apply only to the hot shard? That needs a contract field.
+3. Should query load grow with shard size? Today it is independent.
+4. **Staggered DDL:** a query can arrive at a shard before the shard has received its DDL. Phase 1 drops such queries (the scheduler cannot record an arrival for a build it has not seen). Phase 3 needs an answer: run them as pre-DDL steady state and backfill their timestamps once the build exists (an `arrived_at`/`started_at`/`finished_at` on the arrival and job calls), or shift the measurement window per shard.
+5. The bimodal preset's advised worker memory assumes 640 bytes per vector; the scheduler's cost model says 1,024 (`MemFactor` 2 times 4-byte floats times 128 dims). The fit boundary moves; align the two before Phase 3.
+6. Should index-needing queries cost more CPU than others?
+7. `math/rand/v2`'s derived methods are not promised stable across Go releases; store generated workloads as JSON alongside results, not only the seed.
+8. Capacity: at 50 shards a round is 30k to 40k shard-level queries; at 10x that is tens of thousands of HTTP calls per second with three calls per query. Step 7 will likely need batched reporting (one call per shard per poll interval carrying arrivals, starts and finishes).
+
 ### Cross-check of step 4, the Compose stack (2026-10-05)
 
 A fresh agent wrote 9 Go tests (10 cases) that bring up their own copy of the stack under project `kgpu-xcheck` and drive it only through the API and the `docker` CLI. 7 cases passed, 3 failed. Passing cases of note: `docker stop` on a leaseholder with a long remainder released the build and another worker re-claimed it within 0.4 s, before the lease would have expired; with a short remainder the build was finished before exit; a lease that expired while the scheduler was *stopped* was reaped exactly once by the next scheduler; `--scale worker=3` gave three simultaneous leases by three distinct owners.

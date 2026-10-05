@@ -185,10 +185,10 @@ RETURNING build_id, attempt, n_vectors, dim;
 - [x] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), record query arrivals and completions, accept shard load reports and answer with the build's current placement, read round status
 - [x] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
 - [x] Reaper in the scheduler
-- [ ] Shard simulator: one binary running N shards as goroutines. Each shard submits its build, generates its query stream, runs the local build and ready queries on its single CPU under the rules above, reports its load every poll interval, and obeys placement changes in the reply (abort a preempted local build; start a build moved to local)
-- [ ] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
+- [x] Shard simulator: one binary running N shards as goroutines. Each shard submits its build, replays its query stream, runs the local build and ready queries on its single CPU under the rules above, reports its load every poll interval, and obeys placement changes in the reply (abort a preempted local build; start a build moved to local)
+- [x] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Written by an independent agent against a fixed contract (`experiments/workload`); six presets; queries correlated through cluster-level fan-out.
 - [x] Docker Compose: Postgres, scheduler, 2 workers (shard simulator joins in the next step). 6 shards by default.
-- [ ] Per-round timeline output: for each shard, the build (with any placement change) and each query's arrival, start and end
+- [x] Per-round timeline output: for each shard, the build (with any placement change) and each query's arrival, start and end; plus cluster-query latency as the slowest piece and the straggler lag
 - [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
 
 ### Failure tests

@@ -1,0 +1,117 @@
+== Compose round: scenario=skewed shards=6 workers=2 seed=1 rounds=1 time_scale=10 (2026-10-05 02:50:27 PDT, commit add1f1f)
+
+== workload
+   skewed, 6 shards, seed 1: horizon=30s cluster_rate=63.2 q/s fanout=0.30 needs_index=0.50 advised pool=2 workers x 16384 MiB
+     shard  0: n_vectors= 200000 ddl_offset=0s     queries= 557 (fanout 353, single 204, local_ddl 0; needs_index 268)
+     shard  1: n_vectors=  66667 ddl_offset=0s     queries= 568 (fanout 345, single 223, local_ddl 0; needs_index 274)
+     shard  2: n_vectors=  40000 ddl_offset=0s     queries= 578 (fanout 361, single 216, local_ddl 1; needs_index 268)
+     shard  3: n_vectors=  50000 ddl_offset=0s     queries= 552 (fanout 355, single 197, local_ddl 0; needs_index 273)
+     shard  4: n_vectors=  33333 ddl_offset=0s     queries= 585 (fanout 369, single 216, local_ddl 0; needs_index 291)
+     shard  5: n_vectors= 100000 ddl_offset=0s     queries= 572 (fanout 368, single 204, local_ddl 0; needs_index 279)
+     total shard-level queries: 3412
+
+== up
+    Container kgpu-scheduler-1 Started 
+    Container kgpu-scheduler-1 Healthy 
+    Container kgpu-scheduler-1 Healthy 
+    Container kgpu-shards-1 Started 
+    Container kgpu-worker-2 Started 
+    Container kgpu-worker-1 Started 
+   shards container: exited 0 after 4 s
+
+== shardsim output (timeline)
+   round 1  scenario=skewed seed=1  time_scale=10
+   duration 3.3s real (32.7s modeled)   straggler lag 0.3s   builds: 6 gpu, 0 local   queries: 3412
+   query latency (slowest piece): fan-out p50 0.4s p99 2.0s (n=532)   single-shard p50 0.0s p99 1.7s (n=1260)
+   shard  n_vectors place  att  submit   b.start  b.done   finish   queries max wait
+   0      200000    gpu    1    0.0s     0.9s     1.7s     3.3s     557     2.0s     ##############################
+   1      66667     gpu    1    0.0s     0.5s     0.9s     3.0s     568     1.0s     ###########################
+   2      40000     gpu    1    0.0s     0.2s     0.5s     3.0s     578     0.5s     ###########################
+   3      50000     gpu    1    0.0s     0.9s     1.2s     3.0s     552     1.5s     ###########################
+   4      33333     gpu    1    0.0s     0.6s     0.9s     3.0s     585     1.0s     ###########################
+   5      100000    gpu    1    0.0s     0.2s     0.6s     3.0s     572     1.0s     ###########################
+   
+
+== shardsim log (round events)
+   level=INFO msg="round started" round_id=1 scenario=skewed seed=1 n_shards=6 time_scale=10
+   level=INFO msg=submitted round_id=1 shard_id=5 build_id=5:1 placement=gpu reason=always_gpu n_vectors=100000 attempt=0
+   level=INFO msg=submitted round_id=1 shard_id=2 build_id=2:1 placement=gpu reason=always_gpu n_vectors=40000 attempt=0
+   level=INFO msg=submitted round_id=1 shard_id=3 build_id=3:1 placement=gpu reason=always_gpu n_vectors=50000 attempt=0
+   level=INFO msg=submitted round_id=1 shard_id=1 build_id=1:1 placement=gpu reason=always_gpu n_vectors=66667 attempt=0
+   level=INFO msg=submitted round_id=1 shard_id=0 build_id=0:1 placement=gpu reason=always_gpu n_vectors=200000 attempt=0
+   level=INFO msg=submitted round_id=1 shard_id=4 build_id=4:1 placement=gpu reason=always_gpu n_vectors=33333 attempt=0
+   level=INFO msg="build state" round_id=1 shard_id=5 build_id=5:1 placement=gpu state=leased attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=2 build_id=2:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=2 build_id=2:1 placement=gpu state=done attempt=1
+   level=INFO msg="build state" round_id=1 shard_id=1 build_id=1:1 placement=gpu state=leased attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=5 build_id=5:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=5 build_id=5:1 placement=gpu state=done attempt=1
+   level=INFO msg="build state" round_id=1 shard_id=3 build_id=3:1 placement=gpu state=leased attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=1 build_id=1:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=1 build_id=1:1 placement=gpu state=done attempt=1
+   level=INFO msg="build state" round_id=1 shard_id=0 build_id=0:1 placement=gpu state=leased attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=4 build_id=4:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=4 build_id=4:1 placement=gpu state=done attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=3 build_id=3:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=3 build_id=3:1 placement=gpu state=done attempt=1
+   level=INFO msg="index ready" round_id=1 shard_id=0 build_id=0:1 attempt=1 placement=gpu
+   level=INFO msg="build state" round_id=1 shard_id=0 build_id=0:1 placement=gpu state=done attempt=1
+   level=INFO msg="round finished" round_id=1 duration=3.271s duration_modeled=32.71s straggler_lag=259ms builds_gpu=6 builds_local=0 queries=3412
+
+== scheduler log (placements, reaper, rounds)
+   level=INFO msg="round started" round_id=1 scenario=skewed seed=1 n_shards=6
+   level=INFO msg="build placed" build_id=5:1 round_id=1 attempt=0 shard_id=5 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=100000 dim=128 mem_bytes=102400000 live_workers=2
+   level=INFO msg="build placed" build_id=2:1 round_id=1 attempt=0 shard_id=2 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=40000 dim=128 mem_bytes=40960000 live_workers=2
+   level=INFO msg="build placed" build_id=3:1 round_id=1 attempt=0 shard_id=3 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=50000 dim=128 mem_bytes=51200000 live_workers=2
+   level=INFO msg="build placed" build_id=1:1 round_id=1 attempt=0 shard_id=1 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=66667 dim=128 mem_bytes=68267008 live_workers=2
+   level=INFO msg="build placed" build_id=0:1 round_id=1 attempt=0 shard_id=0 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=200000 dim=128 mem_bytes=204800000 live_workers=2
+   level=INFO msg="build placed" build_id=4:1 round_id=1 attempt=0 shard_id=4 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=33333 dim=128 mem_bytes=34132992 live_workers=2
+   level=INFO msg="rounds finished" count=1
+
+== workers (claims and completions)
+   09:50:41.657 INFO  claimed build_id=2:1 attempt=1 round_id=1 n_vectors=40000 dim=128 estimate_s=0.3
+   09:50:41.956 INFO  completed build_id=2:1 attempt=1 round_id=1 kind=fake index_bytes=25600000 elapsed_s=0.3
+   09:50:41.957 INFO  claimed build_id=1:1 attempt=1 round_id=1 n_vectors=66667 dim=128 estimate_s=0.37
+   09:50:42.329 INFO  completed build_id=1:1 attempt=1 round_id=1 kind=fake index_bytes=42666880 elapsed_s=0.37
+   09:50:42.329 INFO  claimed build_id=3:1 attempt=1 round_id=1 n_vectors=50000 dim=128 estimate_s=0.33
+   09:50:42.656 INFO  completed build_id=3:1 attempt=1 round_id=1 kind=fake index_bytes=32000000 elapsed_s=0.33
+   09:50:41.613 INFO  claimed build_id=5:1 attempt=1 round_id=1 n_vectors=100000 dim=128 estimate_s=0.46
+   09:50:42.078 INFO  completed build_id=5:1 attempt=1 round_id=1 kind=fake index_bytes=64000000 elapsed_s=0.46
+   09:50:42.078 INFO  claimed build_id=4:1 attempt=1 round_id=1 n_vectors=33333 dim=128 estimate_s=0.28
+   09:50:42.361 INFO  completed build_id=4:1 attempt=1 round_id=1 kind=fake index_bytes=21333120 elapsed_s=0.28
+   09:50:42.361 INFO  claimed build_id=0:1 attempt=1 round_id=1 n_vectors=200000 dim=128 estimate_s=0.75
+   09:50:43.115 INFO  completed build_id=0:1 attempt=1 round_id=1 kind=fake index_bytes=128000000 elapsed_s=0.75
+
+== round rows (from the scheduler)
+   round 1: n_shards=6 started=2026-10-05T09:50:41.458922Z finished=2026-10-05T09:50:44.729939Z
+   builds: 0:1=gpu/done@1, 1:1=gpu/done@1, 2:1=gpu/done@1, 3:1=gpu/done@1, 4:1=gpu/done@1, 5:1=gpu/done@1
+   queries recorded: 3412, finished: 3412
+   shard_status: 0:q=0 done=True, 1:q=0 done=True, 2:q=0 done=True, 3:q=0 done=True, 4:q=0 done=True, 5:q=0 done=True
+
+== timeline JSON written by the simulator
+   total 1560
+   drwxr-xr-x    2 65532    65532         4096 Oct  5 09:50 .
+   drwxr-xr-x    1 root     root          4096 Oct  5 09:50 ..
+   -rw-r--r--    1 65532    65532      1585760 Oct  5 09:50 round-1.json
+   {
+     "round_id": 1,
+     "scenario": "skewed",
+     "seed": 1,
+     "time_scale": 10,
+     "started_at": "2026-10-05T09:50:41.458922Z",
+     "duration": 3271017000,
+     "duration_modeled": 32710170000,
+     "straggler_lag": 258744000,
+     "builds_gpu": 6,
+     "builds_local": 0,
+     "queries": 3412,
+     "shards": [
+       {
+         "shard_id": 0,
+         "n_vectors": 200000,
+         "placement": "gpu",
+         "attempt": 1,
+         "build_
+== Result: PASS
+   stack removed (KEEP=1 keeps it)
+log: test-logs/phase1/step5-compose-round.log

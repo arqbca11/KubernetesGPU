@@ -81,7 +81,7 @@ type Shard struct {
 
 func NewShard(w workload.ShardWorkload, dim int32, round int64, api *client.Client, cfg Config, log *slog.Logger) *Shard {
 	return &Shard{w: w, dim: dim, round: round, api: api, cfg: cfg,
-		log: log.With("round_id", round, "shard_id", w.ShardID, "build_id", fmt.Sprintf("%d:%d", w.ShardID, round))}
+		log: log.With("shard_id", w.ShardID, "build_id", fmt.Sprintf("%d:%d", w.ShardID, round))} // round_id comes from the caller's logger
 }
 
 // Events returns the shard's timeline events (after Run).
@@ -137,7 +137,16 @@ func (s *Shard) Run(ctx context.Context, start time.Time) error {
 // ---- arrivals ------------------------------------------------------------------
 
 func (s *Shard) arrivals(ctx context.Context) {
+	// Queries that arrive before this shard's DDL belong to the pre-DDL steady
+	// state. Phase 1 drops them (the scheduler does not know the shard yet, so
+	// it would refuse the arrival); the staggered scenario in Phase 3 needs a
+	// better answer (open question in the design doc).
+	skipped := 0
 	for _, q := range s.w.Queries {
+		if q.Arrival < s.w.DDLOffset {
+			skipped++
+			continue
+		}
 		at := s.start.Add(s.cfg.scale(q.Arrival))
 		select {
 		case <-time.After(time.Until(at)):
@@ -162,7 +171,7 @@ func (s *Shard) arrivals(ctx context.Context) {
 	}
 	s.mu.Lock()
 	s.streamDone = true
-	s.event("stream exhausted: %d queries arrived", len(s.w.Queries))
+	s.event("stream exhausted: %d queries arrived (%d before the DDL were not replayed)", len(s.w.Queries)-skipped, skipped)
 	s.mu.Unlock()
 }
 

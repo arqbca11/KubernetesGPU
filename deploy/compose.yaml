@@ -1,8 +1,9 @@
-# Phase 1 stack: Postgres, the scheduler, N GPU workers (fake builds).
+# Phase 1 stack: Postgres, the scheduler, N GPU workers (fake builds), the shard simulator.
 #
 #   docker compose -f deploy/compose.yaml up -d --build          # 2 workers (default)
 #   docker compose -f deploy/compose.yaml up -d --scale worker=3
 #   docker compose -f deploy/compose.yaml logs -f scheduler worker
+#   docker compose -f deploy/compose.yaml logs -f shards         # the per-round timeline
 #   docker compose -f deploy/compose.yaml down -v                # also drops the database
 #
 # Knobs are environment variables with defaults below; set them in the shell
@@ -80,5 +81,32 @@ services:
     stop_grace_period: 15s
     restart: unless-stopped
 
+  # The shard simulator: N shards as goroutines in one container, driving rounds.
+  # ROUNDS=0 runs rounds forever (useful while running the failure tests).
+  shards:
+    build:
+      context: ..
+      dockerfile: shard/Dockerfile
+    environment:
+      SCHEDULER_URL: http://scheduler:8080
+      SCENARIO: ${SCENARIO:-skewed}
+      N_SHARDS: ${N_SHARDS:-6}
+      SEED: ${SEED:-1}
+      ROUNDS: ${ROUNDS:-1}
+      ROUND_GAP: ${ROUND_GAP:-2s}
+      TIME_SCALE: ${FAKE_TIME_SCALE:-1}   # the same number the workers use
+      POLL_INTERVAL: ${POLL_INTERVAL:-500ms}
+      MIN_WORKERS: ${MIN_WORKERS:-2}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      TIMELINE_DIR: /timelines
+    volumes:
+      - timelines:/timelines
+    init: true
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   pgdata:
+  timelines:

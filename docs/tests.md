@@ -75,6 +75,26 @@ Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are n
 | test_survives_lost_database_connections_mid_build | Mid-build, every one of the worker's backend connections is terminated server-side with `pg_terminate_backend` (what a Postgres restart does to clients). | All three threads reconnect; the lease is renewed in time (no reap, attempt stays 1); the build completes; the worker goes on to claim and complete the next one (bug log 7, decision 48). |
 | test_renew_outage_past_lease_deadline_assumes_lost | Every renew raises a connection error for longer than the lease. | The worker assumes the lease is lost, cancels the build, counts it lost and writes nothing (decision 48). |
 
+## Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`
+
+Pure functions; no database. The generator's modeling choices and their references are in `experiments/workload/DESIGN.md`.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| Determinism | Every preset generated twice with seed 42, once with 43. | Same seed gives byte-identical JSON; a different seed differs (invariant 10). |
+| PresetsValidate | All 6 presets at 6 and 50 shards, seeds 1 to 5; a bad name; 0 shards. | Every preset passes `Validate()`; bad inputs are errors. |
+| ZipfSkew | The skewed preset at exponents 0.5, 1.0, 1.5. | Largest/median ratio is at least 3 at 1.0, rises with the exponent, stays mild at 0.5; sizes stay within [Min, Max]. |
+| BimodalTwoClusters | Bimodal at 6 and 50 shards, 5 seeds. | Two size clusters with nothing between, the right heavy count, and some but not all heavy builds exceed the advised worker memory. |
+| ClusterQueryRate | uniform, skewed, downstream_heavy at 6 and 50 shards, 3 seeds. | The number of cluster-level queries is within 4 standard deviations of rate times horizon. |
+| PerShardLoadMatchesTarget | Skewed at 6 and 50 shards, 4 seeds. | Mean piece duration matches config; per-shard CPU utilisation is 0.4 within 15% at both scales. |
+| NeedsIndexFraction | Skewed at 50 shards, fractions 0, 0.5, 0.8, 1. | The fraction by cluster query is within 0.03; all pieces of one query agree; local DDL never needs the index. |
+| FanOutPieces | Skewed at 6 and 50 shards. | Fan-out pieces share id and arrival and land on distinct shards; width stays in range and covers it; single-shard queries have one piece; the fan-out fraction matches. |
+| HotShard | downstream_heavy at 6 and 50 shards over a 600 s horizon. | The hot shard gets about M times a typical shard's single-shard queries and about 4 times its CPU load. |
+| StreamFiniteAndSorted | All presets at 50 shards. | Shard ids in order; streams sorted; arrivals within [0, Horizon]; durations positive; non-fan-out ids unique. |
+| LocalDDL | Skewed at 50 shards over a 400 s horizon. | Local DDL count is about rate times shards times horizon; mean duration about the configured 2 s. |
+| DDLOffsets | Staggered at 6 and 50 shards; every other preset. | Staggered offsets lie in [0, Spread] and span it, and the horizon outlasts the spread; all-at-once offsets are zero. |
+| PresetTable | All presets at 6 and 50 shards. | Prints each preset's parameters (documentation only). |
+
 ## Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`
 
 Integration tests: the real scheduler API over HTTP, real Postgres, and an in-test fake worker that claims and completes GPU builds. Workloads are hand-built, so these do not depend on the generator.

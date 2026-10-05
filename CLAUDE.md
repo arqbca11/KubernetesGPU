@@ -81,6 +81,9 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | Python unit tests only, no database | `cd worker && uv run pytest` (database tests skip without `TEST_DATABASE_URL`) |
 | Run the worker locally | `cd worker && DATABASE_URL=... LOG_FORMAT=text FAKE_TIME_SCALE=10 uv run python -m kgpu_worker` (env vars in `worker/kgpu_worker/config.py`) |
 | Build the worker image | `docker build -t kgpu-worker worker/` |
+| Workload generator tests (pure, no database) | `go test -v ./experiments/workload/` |
+| Print a generated workload | `PRINT_WORKLOAD=1 SCENARIO=skewed N_SHARDS=6 SEED=1 go run ./shard/cmd/shardsim` (presets: uniform, skewed, bimodal, downstream_heavy, staggered, shrinking_pool) |
+| Run the shard simulator against a running scheduler | `SCHEDULER_URL=http://127.0.0.1:8080 TIME_SCALE=10 LOG_FORMAT=text go run ./shard/cmd/shardsim` (env vars at the top of `shard/cmd/shardsim/main.go`) |
 | Run the whole stack | `docker compose -f deploy/compose.yaml up -d --build` (add `--scale worker=3` for three workers); `docker compose -f deploy/compose.yaml logs -f scheduler worker`; `docker compose -f deploy/compose.yaml down -v` to stop and drop the database. API on `127.0.0.1:8080`. Knobs are env vars, see the top of `deploy/compose.yaml`; `FAKE_TIME_SCALE=10` speeds fake builds up. |
 | Compose failure tests (kill, pause, scheduler restart, duplicate submit) | `scripts/compose-failures.sh` (saves `test-logs/phase1/step4-compose-failures.log`; `KEEP=1` leaves the stack up) |
 
