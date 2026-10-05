@@ -75,6 +75,16 @@ Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are n
 | test_survives_lost_database_connections_mid_build | Mid-build, every one of the worker's backend connections is terminated server-side with `pg_terminate_backend` (what a Postgres restart does to clients). | All three threads reconnect; the lease is renewed in time (no reap, attempt stays 1); the build completes; the worker goes on to claim and complete the next one (bug log 7, decision 48). |
 | test_renew_outage_past_lease_deadline_assumes_lost | Every renew raises a connection error for longer than the lease. | The worker assumes the lease is lost, cancels the build, counts it lost and writes nothing (decision 48). |
 
+## Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`
+
+Integration tests: the real scheduler API over HTTP, real Postgres, and an in-test fake worker that claims and completes GPU builds. Workloads are hand-built, so these do not depend on the generator.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| TwoShardRoundEndToEnd | Two shards, an 8 GiB worker, a fan-out query that spans both shards and needs the index, independent queries, a single-shard query; the round runs at 20x. | Both builds go to the GPU and finish at attempt 1; every query finishes; a query that needs the index never starts before its shard's build is done; an independent query runs at once on a free CPU; the fan-out query's latency is its slowest piece's; the round is stamped and the timeline has every shard, query and cluster query (decisions 32, 52, 56). |
+| LocalBuildBlocksThenDrains | A worker with 1 byte of capacity, so the build is placed local; two queries arrive during it, one needing the index. | Both queries start only after the local build finishes: the CPU was occupied (modeling assumption; decision 32). |
+| PreemptionAbortsLocalBuild | A local build is preempted to the GPU queue at about 20% progress (as Phase 3's reconsider would), and a capable worker appears. | The shard aborts the local build at its next slice, the independent query runs on the freed CPU while the GPU builds, the index query waits for the GPU completion, and the build ends done at attempt 1 (decisions 31, 54). |
+
 ## Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`
 
 Not a test suite but an operator's script: it brings the real stack up and does to it what the roadmap's failure tests describe, narrating what Postgres and the container logs show.
