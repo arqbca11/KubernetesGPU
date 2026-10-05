@@ -1,0 +1,132 @@
+== Go tests against a throwaway Postgres
+date:      2026-10-05 02:50:55 PDT
+commit:    add1f1f (uncommitted changes)
+go:        go1.27.1
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-62784, port 31095)
+go:        go test -p 1 -count=1 -v ./experiments/workload/
+python:    skipped
+
+Lines starting with 'store_test.go:N:' are the test narrating what it did.
+Lines tagged [db] are the build row as Postgres had it at that moment.
+
+== go test
+=== RUN   TestDeterminism
+    generate_test.go:49: Contract (workload.go): Generate is pure; same Scenario and seed give byte-identical output. CLAUDE.md invariant 10: workloads are seeded and reproducible.
+    generate_test.go:61: uniform: generated twice with seed 42 -> 134770 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: skewed: generated twice with seed 42 -> 345982 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: bimodal: generated twice with seed 42 -> 345887 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: downstream_heavy: generated twice with seed 42 -> 199142 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: staggered: generated twice with seed 42 -> 477841 bytes of JSON, identical; seed 43 differs, as expected.
+    generate_test.go:61: shrinking_pool: generated twice with seed 42 -> 345990 bytes of JSON, identical; seed 43 differs, as expected.
+--- PASS: TestDeterminism (0.03s)
+=== RUN   TestPresetsValidate
+    generate_test.go:66: Contract: consumers run Validate() on every workload. Every preset must pass at 6 shards (roadmap default) and 50 (Phase 1 step 7), over several seeds.
+    generate_test.go:81: uniform n=6: 5 seeds validate; seed 1 has 1252 shard-level queries, cluster rate 23.7/s, horizon 30s.
+    generate_test.go:81: skewed n=6: 5 seeds validate; seed 1 has 3412 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: bimodal n=6: 5 seeds validate; seed 1 has 3411 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: downstream_heavy n=6: 5 seeds validate; seed 1 has 2010 shard-level queries, cluster rate 46.5/s, horizon 30s.
+    generate_test.go:81: staggered n=6: 5 seeds validate; seed 1 has 4632 shard-level queries, cluster rate 63.2/s, horizon 40s.
+    generate_test.go:81: shrinking_pool n=6: 5 seeds validate; seed 1 has 3412 shard-level queries, cluster rate 63.2/s, horizon 30s.
+    generate_test.go:81: uniform n=50: 5 seeds validate; seed 1 has 11699 shard-level queries, cluster rate 44.1/s, horizon 30s.
+    generate_test.go:81: skewed n=50: 5 seeds validate; seed 1 has 29934 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:81: bimodal n=50: 5 seeds validate; seed 1 has 30021 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:81: downstream_heavy n=50: 5 seeds validate; seed 1 has 12052 shard-level queries, cluster rate 83.7/s, horizon 30s.
+    generate_test.go:81: staggered n=50: 5 seeds validate; seed 1 has 40086 shard-level queries, cluster rate 117.6/s, horizon 40s.
+    generate_test.go:81: shrinking_pool n=50: 5 seeds validate; seed 1 has 29934 shard-level queries, cluster rate 117.6/s, horizon 30s.
+    generate_test.go:90: Unknown preset name and 0 shards are rejected with an error.
+--- PASS: TestPresetsValidate (0.05s)
+=== RUN   TestZipfSkew
+    generate_test.go:108: Roadmap Phase 3 sweep: Zipf exponent 0.5, 1.0, 1.5. Rank-size Zipf (size of rank r = Max/r^s) at 6 shards gives largest/median of about 1.9, 3.4, 6.3.
+    generate_test.go:122: exponent 0.5: sizes [81650 89443 200000 100000 115470 141421], largest/median 1.86
+    generate_test.go:122: exponent 1.0: sizes [33333 40000 200000 50000 66667 100000], largest/median 3.43
+    generate_test.go:122: exponent 1.5: sizes [13608 17889 200000 25000 38490 70711], largest/median 6.30
+    generate_test.go:133: As expected: 1.0 is several times the median, 1.5 more, 0.5 less.
+--- PASS: TestZipfSkew (0.00s)
+=== RUN   TestBimodalTwoClusters
+    generate_test.go:137: Roadmap scenario Bimodal: a few huge builds, many tiny; some huge builds exceed one worker's memory. Light cluster in [Min, 2*Min], heavy in [0.8*Max, Max], heavy count round(0.25*n), worker memory fits heavy builds up to 0.9*Max.
+    generate_test.go:165: n=6: 2 heavy, 4 light, nothing in the gap; 1 heavy builds exceed 219 MB worker memory.
+    generate_test.go:165: n=50: 13 heavy, 37 light, nothing in the gap; 6 heavy builds exceed 219 MB worker memory.
+--- PASS: TestBimodalTwoClusters (0.00s)
+=== RUN   TestClusterQueryRate
+    generate_test.go:172: StreamProfile.ClusterQueryRate is the mean coordinator-level query rate. Arrivals are Poisson, so the count over the horizon should be within 4 sqrt(expected) of rate*horizon.
+    generate_test.go:184: uniform n=6: 652 cluster queries vs expected 711 (tolerance 107).
+    generate_test.go:184: uniform n=50: 1291 cluster queries vs expected 1324 (tolerance 146).
+    generate_test.go:184: skewed n=6: 1792 cluster queries vs expected 1895 (tolerance 174).
+    generate_test.go:184: skewed n=50: 3514 cluster queries vs expected 3529 (tolerance 238).
+    generate_test.go:184: downstream_heavy n=6: 1392 cluster queries vs expected 1396 (tolerance 149).
+    generate_test.go:184: downstream_heavy n=50: 2511 cluster queries vs expected 2510 (tolerance 200).
+--- PASS: TestClusterQueryRate (0.01s)
+=== RUN   TestPerShardLoadMatchesTarget
+    generate_test.go:192: Presets derive the cluster rate from a target per-shard CPU utilisation (skewed: 0.4) so load per shard is the same at 6 and 50 shards (roadmap sweep: query load relative to build work). Check the realised mean piece duration and offered load.
+    generate_test.go:214: n=6: 14133 pieces, mean 20.003404ms (configured 20ms), per-shard utilisation 0.393 (target 0.4).
+    generate_test.go:214: n=50: 120310 pieces, mean 19.839436ms (configured 20ms), per-shard utilisation 0.398 (target 0.4).
+--- PASS: TestPerShardLoadMatchesTarget (0.00s)
+=== RUN   TestNeedsIndexFraction
+    generate_test.go:219: NeedsIndexFraction is by cluster query (contract), and every piece of one cluster query agrees. Roadmap sweep values 0, 0.5, 1. Local DDL never needs the index.
+    generate_test.go:247: configured 0.00: 0 of 3549 cluster queries need the index (0.000).
+    generate_test.go:247: configured 0.50: 1731 of 3549 cluster queries need the index (0.488).
+    generate_test.go:247: configured 0.80: 2831 of 3549 cluster queries need the index (0.798).
+    generate_test.go:247: configured 1.00: 3549 of 3549 cluster queries need the index (1.000).
+--- PASS: TestNeedsIndexFraction (0.01s)
+=== RUN   TestFanOutPieces
+    generate_test.go:252: A fan-out query produces one piece on each of k distinct shards, k in [FanOutShardsMin, FanOutShardsMax], all with the same ClusterQueryID and Arrival (contract). Single-shard queries have exactly one piece.
+    generate_test.go:290: n=6: 571 fan-out queries (fraction 0.301, configured 0.30) with widths spanning [2,6]; 1323 single-shard queries; all pieces share arrival.
+    generate_test.go:290: n=50: 1081 fan-out queries (fraction 0.312, configured 0.30) with widths spanning [2,50]; 2385 single-shard queries; all pieces share arrival.
+--- PASS: TestFanOutPieces (0.00s)
+=== RUN   TestHotShard
+    generate_test.go:295: Roadmap scenario Downstream-heavy: one shard has a much higher query rate. Contract: the hot shard receives HotShardRateMultiplier times its share of single-shard queries. The preset also sizes the multiplier so the hot shard's total load is 4x a typical shard's.
+    generate_test.go:331: n=6: multiplier 8.9; hot shard got 8.61x a typical shard's single-shard queries and 3.80x its CPU load (target 4).
+    generate_test.go:331: n=50: multiplier 24.1; hot shard got 23.58x a typical shard's single-shard queries and 4.02x its CPU load (target 4).
+    generate_test.go:335: Without a hot shard (skewed, HotShard=-1) single-shard routing is uniform; checked by the totals below.
+    generate_test.go:343:   skewed shard 0: 213 single-shard queries
+    generate_test.go:343:   skewed shard 1: 206 single-shard queries
+    generate_test.go:343:   skewed shard 2: 241 single-shard queries
+    generate_test.go:343:   skewed shard 3: 236 single-shard queries
+    generate_test.go:343:   skewed shard 4: 201 single-shard queries
+    generate_test.go:343:   skewed shard 5: 221 single-shard queries
+--- PASS: TestHotShard (0.01s)
+=== RUN   TestStreamFiniteAndSorted
+    generate_test.go:348: Decision 30: the stream is finite per round. Contract: each shard's queries are sorted by Arrival and nothing arrives after Horizon; shard ids 0..n-1 in order; ClusterQueryIDs of non-fan-out queries are unique.
+    generate_test.go:381: uniform n=50: 11849 queries, all sorted, last arrival 29.998s <= horizon 30s.
+    generate_test.go:381: skewed n=50: 29749 queries, all sorted, last arrival 29.988s <= horizon 30s.
+    generate_test.go:381: bimodal n=50: 29721 queries, all sorted, last arrival 29.998s <= horizon 30s.
+    generate_test.go:381: downstream_heavy n=50: 11925 queries, all sorted, last arrival 29.989s <= horizon 30s.
+    generate_test.go:381: staggered n=50: 39295 queries, all sorted, last arrival 39.997s <= horizon 40s.
+    generate_test.go:381: shrinking_pool n=50: 29749 queries, all sorted, last arrival 29.988s <= horizon 30s.
+--- PASS: TestStreamFiniteAndSorted (0.01s)
+=== RUN   TestLocalDDL
+    generate_test.go:386: Owner guidance: local DDL is rare, long and touches one shard. Generated per shard as Poisson at LocalDDLRatePerShard with mean LocalDDLDuration; check count and mean over a long horizon.
+    generate_test.go:408: 83 local DDL statements (expected 100), mean duration 2.047s (configured 2s), 100x a query's mean.
+--- PASS: TestLocalDDL (0.02s)
+=== RUN   TestDDLOffsets
+    generate_test.go:412: Roadmap scenario Staggered: shards submit at different times. Contract: staggered offsets lie in [0, Spread]; all_at_once offsets are zero. Stratified sampling means the earliest offset is in the first 1/n of Spread and the latest in the last 1/n.
+    generate_test.go:430: staggered n=6: offsets span [1.437s, 14.881s] within Spread 15s; horizon 40s outlasts it.
+    generate_test.go:430: staggered n=50: offsets span [8ms, 14.799s] within Spread 15s; horizon 40s outlasts it.
+    generate_test.go:442: All other presets are all_at_once and every offset is zero.
+--- PASS: TestDDLOffsets (0.00s)
+=== RUN   TestPresetTable
+    generate_test.go:446: Prints the preset parameters (used for DESIGN.md); no assertions beyond construction.
+    generate_test.go:451: n=6 uniform          sizes=uniform[100000,100000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=23.7/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 skewed           sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 bimodal          sizes=bimodal[10000,400000] s=0.0 heavy=0.25 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=219MB
+    generate_test.go:451: n=6 downstream_heavy sizes=uniform[80000,120000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=46.5/s fan=0.15 k=[2,6] needs=0.80 meanQ=20ms lddl=0.005/2s hot=0 x8.9 workers=2 mem=16384MB
+    generate_test.go:451: n=6 staggered        sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=staggered/15s horizon=40s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=6 shrinking_pool   sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=63.2/s fan=0.30 k=[2,6] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=2 mem=16384MB
+    generate_test.go:451: n=50 uniform          sizes=uniform[100000,100000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=44.1/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 skewed           sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 bimodal          sizes=bimodal[10000,400000] s=0.0 heavy=0.25 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=219MB
+    generate_test.go:451: n=50 downstream_heavy sizes=uniform[80000,120000] s=0.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=83.7/s fan=0.15 k=[2,50] needs=0.80 meanQ=20ms lddl=0.005/2s hot=0 x24.1 workers=3 mem=16384MB
+    generate_test.go:451: n=50 staggered        sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=staggered/15s horizon=40s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+    generate_test.go:451: n=50 shrinking_pool   sizes=zipf[10000,200000] s=1.0 heavy=0.00 ddl=all_at_once/0s horizon=30s rate=117.6/s fan=0.30 k=[2,50] needs=0.50 meanQ=20ms lddl=0.005/2s hot=-1 x0.0 workers=3 mem=16384MB
+--- PASS: TestPresetTable (0.00s)
+PASS
+ok  	github.com/arqbca11/KubernetesGPU/experiments/workload	0.398s
+
+== Docker events for container kgpu-test-pg-62784
+  02:50:54  create
+  02:50:54  start
+  02:50:56  kill
+  02:50:56  die
+  02:50:56  destroy
+
+== Result: PASS
