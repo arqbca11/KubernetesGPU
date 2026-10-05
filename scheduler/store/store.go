@@ -214,25 +214,26 @@ func (s *Store) SubmitBuild(ctx context.Context, b Build) (inserted bool, err er
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 
-	// Duplicate first: it must stay a no-op even when the round is full or finished.
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM builds WHERE build_id = $1)`, b.BuildID).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil
-	}
-	// Lock the round row, THEN count in a separate statement. Under READ
-	// COMMITTED a statement's snapshot is taken when it starts, before it
-	// blocks on the lock, so a COUNT inside the locking statement would not
-	// see the build inserted by the transaction we waited for. (Found by the
-	// cross-check, 2026-10-02.)
+	// Lock the round row FIRST. Every check below runs in its own statement
+	// after the lock, so each sees the work of the transaction we waited for.
+	// Under READ COMMITTED a statement's snapshot is taken when it starts,
+	// before it blocks on the lock: a check folded into the locking statement
+	// (bug log 4) or run before it (bug log 6) answers from a stale snapshot.
 	var nShards int32
 	var finished *time.Time
 	err = tx.QueryRow(ctx, `SELECT n_shards, finished_at FROM rounds WHERE round_id = $1 FOR UPDATE`, b.RoundID).
 		Scan(&nShards, &finished)
 	if err != nil {
 		return false, fmt.Errorf("submit %s: lock round: %w", b.BuildID, err)
+	}
+	// Duplicate next: a resubmit is a no-op even when the round is full or
+	// finished, including a resubmit that lost a race with its own twin.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM builds WHERE build_id = $1)`, b.BuildID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
 	}
 	if finished != nil {
 		return false, ErrRoundFinished
@@ -622,6 +623,13 @@ func (s *Store) Heartbeat(ctx context.Context, workerID string, memBytes int64) 
 		ON CONFLICT (worker_id) DO UPDATE
 		SET mem_bytes = EXCLUDED.mem_bytes, last_seen = now()`,
 		workerID, memBytes)
+	return err
+}
+
+// Deregister removes a worker that is shutting down cleanly, so pool state
+// stops counting it at once instead of after WORKER_STALE_AFTER (decision 49).
+func (s *Store) Deregister(ctx context.Context, workerID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM workers WHERE worker_id = $1`, workerID)
 	return err
 }
 

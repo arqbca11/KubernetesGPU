@@ -650,3 +650,48 @@ func TestReapFailsBuildAfterRetryBudget(t *testing.T) {
 	}
 	t.Log("MAX_ATTEMPTS=0 disables the budget: an expired lease is requeued regardless of attempt")
 }
+
+// Bug log 6: a resubmit that loses a race with its own twin, into a round's
+// last slot, must be a no-op (inserted=false), not ErrRoundFull. The duplicate
+// check has to run after the round lock, like the count.
+func TestConcurrentDuplicateIntoLastSlotIsNoop(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	for trial := range 5 {
+		r, _ := s.CreateRound(ctx, "test", int64(trial), 1) // one slot
+		b := Build{BuildID: BuildID(1, r), RoundID: r, ShardID: 1, NVectors: 10, Dim: 4, MemBytes: 1, Placement: "gpu"}
+		var mu sync.Mutex
+		inserted, noop, full := 0, 0, 0
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ins, err := s.SubmitBuild(ctx, b)
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case errors.Is(err, ErrRoundFull):
+					full++
+				case err != nil:
+					t.Error(err)
+				case ins:
+					inserted++
+				default:
+					noop++
+				}
+			}()
+		}
+		wg.Wait()
+		t.Logf("trial %d: 8 simultaneous submits of the same build into a 1-slot round -> inserted=%d noop=%d ErrRoundFull=%d", trial, inserted, noop, full)
+		if inserted != 1 || noop != 7 || full != 0 {
+			t.Fatalf("want 1 inserted, 7 no-ops, 0 full")
+		}
+		var n int
+		pool.QueryRow(ctx, `SELECT COUNT(*) FROM builds WHERE round_id = $1`, r).Scan(&n) //nolint:errcheck
+		if n != 1 {
+			t.Fatalf("round holds %d builds", n)
+		}
+	}
+	t.Log("every losing twin was recognised as a duplicate (invariant 6), none was refused as 'round full'")
+}
