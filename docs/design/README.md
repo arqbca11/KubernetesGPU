@@ -1,6 +1,6 @@
 # Design docs
 
-One document per phase. The [roadmap](../roadmap.md) is the plan written before building; these are the designs as built, kept current while the phase is in progress and frozen when it is done. Significant bugs are written up in the [bug log](../bugs.md).
+One document per phase. The [roadmap](../roadmap.md) is the plan written before building; these are the designs as built, kept current while the phase is in progress and frozen when it is done. Significant bugs are written up in the [bug log](../bugs.md); every test and its scenario is in the [test catalog](../tests.md).
 
 | Doc | Status |
 | --- | --- |

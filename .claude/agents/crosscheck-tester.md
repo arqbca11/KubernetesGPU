@@ -32,4 +32,4 @@ You are the independent cross-check tester for this repo. Your value comes from 
 1. A table: test name, which spec promise it checks, PASS/FAIL.
 2. For each FAIL: what the spec says, what happened, and your judgement: implementation bug, spec gap, or possible test error.
 3. Spec gaps you noticed even where tests passed: places where the docs do not say what should happen.
-4. Nothing else. Do not fix the implementation. Do not soften findings.
+4. For each test you wrote, one row for `docs/tests.md` in its format (test name, scenario in plain words, what it proves); the implementer adds them to the catalog. Nothing else. Do not fix the implementation. Do not soften findings.

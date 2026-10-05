@@ -1,6 +1,6 @@
 # Test logs
 
-Narrated test output, kept so what was checked and what happened can be read without rerunning anything. Each log has a header (date, commit, versions), one line per test step as the test narrates it, `[db]` lines showing rows as Postgres held them, the Docker events for the throwaway Postgres container, and the result.
+Narrated test output, kept so what was checked and what happened can be read without rerunning anything. **For a plain-language description of every test and the scenario it checks, read [`docs/tests.md`](../docs/tests.md) first**; the logs are the evidence, the catalog is the explanation. Each log has a header (date, commit, versions), one line per test step as the test narrates it, `[db]` lines showing rows as Postgres held them, the Docker events for the throwaway Postgres container, and the result.
 
 | File | What |
 | --- | --- |

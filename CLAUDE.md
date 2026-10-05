@@ -4,7 +4,7 @@ A scheduler that schedules HNSW vector index builds from ~50 database shards ont
 
 Start small: the default configuration is **6 shards and 2 GPU workers**. Scaling to 50 shards is a config change, done once the small setup runs end to end.
 
-Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. That is the plan written before building. The design as built, with diagrams and a decisions log, is one doc per phase under `docs/design/`. Significant bugs and their causes are in `docs/bugs.md`. Read the roadmap and design doc for the current phase before starting work.
+Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. That is the plan written before building. The design as built, with diagrams and a decisions log, is one doc per phase under `docs/design/`. Significant bugs and their causes are in `docs/bugs.md`. Every test, with the scenario it checks in plain words, is catalogued in `docs/tests.md`; add a row when you add a test. Read the roadmap and design doc for the current phase before starting work.
 
 ## Current phase
 
