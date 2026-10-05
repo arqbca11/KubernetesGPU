@@ -223,6 +223,7 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 39 | **The worker validates every configuration value before connecting and exits with status 2 and one line naming the variable.** Includes `RENEW_INTERVAL_SECONDS < LEASE_SECONDS` and positive `COST_*` values | Fail at first use | A worker must never claim a build it cannot handle. `COST_BANDWIDTH=0` once got as far as a claim and then crashed with the lease held (cross-check, bug log 5). |
 | 40 | **`FAKE_FAIL_BUILD_IDS`: the fake builder fails the listed builds at 50%** | No way to fail a fake build | The `fail` path, and later the Phase 4 question of a failed build and a waiting `needs_index` query, need a documented trigger at the process level. |
 | 41 | **After the claim, every exception that is not a cancellation ends in `fail` with `TypeName: message` as the reason, and the worker keeps claiming.** This covers the builder, the estimate, and the worker's own code. If even `fail` cannot be written, the worker logs it and leaves the lease to the reaper | Let the process crash | A crash leaves the row `leased`; the reaper requeues it, the next worker claims it and crashes too: a poison pill looping through the pool. Bug log 5. |
+| 42 | **Retry budget in the reaper.** When a lease expires on a build whose `attempt` has reached `MAX_ATTEMPTS` (scheduler env, default 5), the reaper marks it `failed` with the reason recorded instead of requeueing it. `0` disables | Requeue forever; cap in the worker | A build that kills every worker that claims it, by exception, by the kernel's out-of-memory killer, by a GPU fault, would otherwise cycle through the pool indefinitely (bug log 5). The reaper is the one place that sees every expiry, and it already runs on every scheduler. Decision 36's exception path handles the half it can see; this handles the rest. A legitimate transient outage that costs several leases in a row would also park the build, which is the right trade: the owner sees a `failed` row with a clear reason instead of a silent loop. |
 
 ## Implementation notes
 
@@ -260,7 +261,7 @@ Lease length (30 s) and renew interval (10 s) are parameters of the calls, not c
 | `scheduler/policy/` | `Policy` interface and `AlwaysGPU` (decision 19). Pure; unit-tested without a database. |
 | `scheduler/store/` | Added rounds, follow-up jobs, pool state, `FinishCompleteRounds`, `Reap` now reports which builds it touched (for the log). |
 | `scheduler/api/` | The HTTP surface, table below. |
-| `scheduler/reaper/` | `Run` ticks `Tick`: reap expired leases (one warning log line per build, with `build_id`, `attempt`, `round_id`, `lease_owner`), then finish complete rounds. |
+| `scheduler/reaper/` | `Run` ticks `Tick`: reap expired leases (one warning log line per build, with `build_id`, `attempt`, `round_id`, `lease_owner`; an error line and `failed` state when the retry budget is exhausted, decision 42), then finish complete rounds. |
 | `scheduler/cmd/scheduler/` | `main`: env config, connect to Postgres with backoff retry, migrate, start reaper, serve HTTP, graceful shutdown on SIGTERM. |
 | `scheduler/Dockerfile`, `.dockerignore` | Image build (decision 22). |
 

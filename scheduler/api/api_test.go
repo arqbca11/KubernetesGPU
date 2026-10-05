@@ -207,7 +207,7 @@ func TestEndToEndRoundOverHTTP(t *testing.T) {
 	report(2, ReportRequest{QueueDepth: 0, StreamDone: true})
 
 	t.Log("--- the reaper tick (or a GET) stamps the round finished")
-	reaper.Tick(ctx, h.st, h.log)
+	reaper.Tick(ctx, h.st, 5, h.log)
 	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
 	if rs.Round.FinishedAt == nil {
 		t.Fatal("round not finished")

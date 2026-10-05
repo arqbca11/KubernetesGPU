@@ -372,26 +372,38 @@ func (s *Store) CompleteLocal(ctx context.Context, buildID string) (bool, error)
 		buildID)
 }
 
-// Reaped identifies one lease the reaper returned to the queue.
+// Reaped identifies one expired lease the reaper acted on. Outcome is
+// "queued" (back in the queue) or "failed" (retry budget exhausted).
 type Reaped struct {
 	BuildID    string
 	RoundID    int64
 	Attempt    int32
 	LeaseOwner string
+	Outcome    string
 }
 
-// Reap returns every expired lease to the queue and reports which ones.
+// Reap acts on every expired lease and reports which ones. A build whose
+// attempt count has reached maxAttempts is marked failed instead of being
+// requeued (decision 42): a build that keeps killing its workers must not
+// cycle through the pool forever. maxAttempts <= 0 means no limit.
 // Idempotent: a second call right after the first touches nothing.
 //
 // started_at means "when the current attempt started" and is cleared here
 // and by Release; enqueued_at keeps the submit time. Time lost to abandoned
 // attempts is therefore finished_at - enqueued_at minus the last attempt.
-func (s *Store) Reap(ctx context.Context) ([]Reaped, error) {
+func (s *Store) Reap(ctx context.Context, maxAttempts int32) ([]Reaped, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE builds
-		SET state = 'queued', lease_owner = NULL, lease_until = NULL, started_at = NULL
+		SET state       = CASE WHEN $1 > 0 AND attempt >= $1 THEN 'failed' ELSE 'queued' END,
+		    fail_reason = CASE WHEN $1 > 0 AND attempt >= $1
+		                       THEN 'lease expired on attempt ' || attempt || ' of ' || $1 || ': retry budget exhausted'
+		                       END,
+		    finished_at = CASE WHEN $1 > 0 AND attempt >= $1 THEN now() END,
+		    lease_owner = NULL, lease_until = NULL, started_at = NULL
 		WHERE state = 'leased' AND lease_until < now()
-		RETURNING build_id, round_id, attempt, (SELECT lease_owner FROM builds b2 WHERE b2.build_id = builds.build_id)`)
+		RETURNING build_id, round_id, attempt, state,
+		          (SELECT lease_owner FROM builds b2 WHERE b2.build_id = builds.build_id)`,
+		maxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +412,7 @@ func (s *Store) Reap(ctx context.Context) ([]Reaped, error) {
 	for rows.Next() {
 		var r Reaped
 		var owner *string
-		if err := rows.Scan(&r.BuildID, &r.RoundID, &r.Attempt, &owner); err != nil {
+		if err := rows.Scan(&r.BuildID, &r.RoundID, &r.Attempt, &r.Outcome, &owner); err != nil {
 			return nil, err
 		}
 		if owner != nil {

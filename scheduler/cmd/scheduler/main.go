@@ -5,6 +5,8 @@
 //	LISTEN_ADDR          default :8080
 //	POLICY               default always_gpu
 //	REAP_INTERVAL        default 2s
+//	MAX_ATTEMPTS         default 5; a build whose lease expires on this attempt is marked failed
+//	                     instead of requeued (decision 42). 0 disables.
 //	WORKER_STALE_AFTER   default 30s; a worker unseen for longer is not in the pool
 //	LOG_FORMAT           json (default) or text
 //	COST_A, COST_SPEEDUP, COST_GPU_OVERHEAD, COST_BANDWIDTH, COST_MEM_FACTOR
@@ -47,6 +49,7 @@ func main() {
 	}
 	cm := costModelFromEnv(log)
 	reapInterval := envDuration(log, "REAP_INTERVAL", 2*time.Second)
+	maxAttempts := envInt(log, "MAX_ATTEMPTS", 5)
 	staleAfter := envDuration(log, "WORKER_STALE_AFTER", 30*time.Second)
 	addr := env("LISTEN_ADDR", ":8080")
 
@@ -65,7 +68,7 @@ func main() {
 	}
 	st := store.New(pool)
 
-	go reaper.Run(ctx, st, reapInterval, log)
+	go reaper.Run(ctx, st, reaper.Config{Interval: reapInterval, MaxAttempts: int32(maxAttempts)}, log)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -74,7 +77,7 @@ func main() {
 	}
 	go func() {
 		log.Info("scheduler listening", "addr", addr, "policy", pol.Name(),
-			"reap_interval", reapInterval, "worker_stale_after", staleAfter)
+			"reap_interval", reapInterval, "max_attempts", maxAttempts, "worker_stale_after", staleAfter)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server failed", "err", err)
 			stop()
@@ -130,6 +133,19 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envInt(log *slog.Logger, key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Error("bad integer", "var", key, "value", v, "err", err)
+		os.Exit(2)
+	}
+	return n
 }
 
 func envDuration(log *slog.Logger, key string, def time.Duration) time.Duration {

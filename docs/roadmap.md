@@ -177,7 +177,7 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 **Complete** (worker): set `state = 'done'` under the same `build_id` + `attempt` guard. A worker holding a stale attempt number can't complete a job someone else now owns.
 
-**Reap** (scheduler, every few seconds): set expired leases back to `queued`. The next claim bumps `attempt`, which fences out the old owner.
+**Reap** (scheduler, every few seconds): set expired leases back to `queued`, or to `failed` once a build's `attempt` has reached the retry budget (`MAX_ATTEMPTS`), so a build that keeps killing its workers cannot cycle forever. The next claim bumps `attempt`, which fences out the old owner.
 
 ### Steps
 

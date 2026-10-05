@@ -182,7 +182,7 @@ func TestWorkerRenewKeepsLeaseAliveUnderReaper(t *testing.T) {
 	advances := 0
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		reaped, err := e.st.Reap(e.ctx)
+		reaped, err := e.st.Reap(e.ctx, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -235,7 +235,7 @@ func TestWorkerKill9MidBuildAnotherWorkerCompletesOnce(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && len(reaped) == 0 {
 		var err error
-		if reaped, err = e.st.Reap(e.ctx); err != nil {
+		if reaped, err = e.st.Reap(e.ctx, 0); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -279,7 +279,7 @@ func TestWorkerSIGSTOPPastLeaseLosesOwnershipAndWritesNothing(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && len(reaped) == 0 {
 		var err error
-		if reaped, err = e.st.Reap(e.ctx); err != nil {
+		if reaped, err = e.st.Reap(e.ctx, 0); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -347,7 +347,7 @@ func TestWorkerReclaimedMidBuildCancelsWithinARenewInterval(t *testing.T) {
 		if _, err := e.pool.Exec(e.ctx, `UPDATE builds SET lease_until = now() - interval '1 second' WHERE build_id = $1 AND attempt = 1 AND state = 'leased'`, id); err != nil {
 			t.Fatal(err)
 		}
-		reaped, err := e.st.Reap(e.ctx)
+		reaped, err := e.st.Reap(e.ctx, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

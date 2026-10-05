@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -63,14 +64,16 @@ func state(t *testing.T, pool *pgxpool.Pool, id string) (st string, attempt int3
 }
 
 // reap runs the reaper and returns how many leases it returned to the queue.
-func reap(t *testing.T, s *Store) int {
+func reap(t *testing.T, s *Store) int { return reapMax(t, s, 0) }
+
+func reapMax(t *testing.T, s *Store, maxAttempts int32) int {
 	t.Helper()
-	r, err := s.Reap(context.Background())
+	r, err := s.Reap(context.Background(), maxAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, x := range r {
-		t.Logf("  [reaper] build %s attempt %d (was leased to %s) -> queued", x.BuildID, x.Attempt, x.LeaseOwner)
+		t.Logf("  [reaper] build %s attempt %d (was leased to %s) -> %s", x.BuildID, x.Attempt, x.LeaseOwner, x.Outcome)
 	}
 	return len(r)
 }
@@ -591,4 +594,59 @@ func TestSchemaRefusesOrphanShardRows(t *testing.T) {
 		t.Fatalf("ReportStatus for a real shard: %v", err)
 	}
 	t.Log("ReportStatus for shard 1 (has a build) -> ok")
+}
+
+// Decision 42: a build whose lease keeps expiring is failed after MAX_ATTEMPTS,
+// not requeued forever. This is the defence against a build that kills every
+// worker that claims it (bug log 5), whatever the mechanism.
+func TestReapFailsBuildAfterRetryBudget(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	r, _ := s.CreateRound(ctx, "test", 1, 100)
+	poison := submit(t, s, r, 1, "gpu", 0, 1<<20)
+	healthy := submit(t, s, r, 2, "gpu", 0, 1<<20)
+	const maxAttempts = 3
+	t.Logf("MAX_ATTEMPTS=%d; the poison build kills every worker that claims it (no fail, no complete, lease just expires)", maxAttempts)
+
+	for i := 1; i <= maxAttempts; i++ {
+		c, ok, _ := s.Claim(ctx, fmt.Sprintf("worker-%d", i), 1<<30, lease)
+		if !ok || c.BuildID != poison {
+			t.Fatalf("claim %d: ok=%v id=%s", i, ok, c.BuildID)
+		}
+		t.Logf("worker-%d claims %s -> attempt %d, then dies", i, c.BuildID, c.Attempt)
+		expireLease(t, pool, poison)
+		n := reapMax(t, s, maxAttempts)
+		if n != 1 {
+			t.Fatalf("reap %d: %d rows", i, n)
+		}
+		st, a := state(t, pool, poison)
+		if i < maxAttempts && st != "queued" {
+			t.Fatalf("after reap %d: state=%s, want queued (attempt %d < %d)", i, st, a, maxAttempts)
+		}
+		if i == maxAttempts && st != "failed" {
+			t.Fatalf("after reap %d: state=%s, want failed (attempt %d reached %d)", i, st, a, maxAttempts)
+		}
+	}
+	var reason string
+	pool.QueryRow(ctx, `SELECT fail_reason FROM builds WHERE build_id = $1`, poison).Scan(&reason) //nolint:errcheck
+	t.Logf("  [db] %s: failed, reason=%q", poison, reason)
+	row(t, pool, poison)
+	if reapMax(t, s, maxAttempts) != 0 {
+		t.Fatal("a failed build was reaped again")
+	}
+	t.Log("the poison build is parked as failed; the queue is clear of it")
+
+	c, ok, _ := s.Claim(ctx, "worker-4", 1<<30, lease)
+	if !ok || c.BuildID != healthy {
+		t.Fatalf("next claim got %q ok=%v, want the healthy build", c.BuildID, ok)
+	}
+	t.Logf("worker-4 claims -> %s: the pool is working again", c.BuildID)
+
+	// With no limit, the same build would still be cycling.
+	expireLease(t, pool, healthy)
+	reapMax(t, s, 0)
+	if st, _ := state(t, pool, healthy); st != "queued" {
+		t.Fatalf("with MAX_ATTEMPTS=0 (disabled) an expired lease must requeue; got %s", st)
+	}
+	t.Log("MAX_ATTEMPTS=0 disables the budget: an expired lease is requeued regardless of attempt")
 }
