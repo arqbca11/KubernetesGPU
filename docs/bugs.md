@@ -6,6 +6,36 @@ Entries are added when a bug changes how we think about the system, is subtle en
 
 ---
 
+## 7. Workers crashed when Postgres restarted
+
+**Found:** 2026-10-05, by the Compose cross-check agent's `docker compose restart postgres` test. Fixed in [`51716f8`](https://github.com/arqbca11/KubernetesGPU/commit/51716f8), `worker/kgpu_worker/worker.py` and `store.py`. **Related:** entry 5 (same class: an exit path while holding a lease that nothing guarded).
+
+**Symptom.** Postgres was restarted while one worker held a lease and the other was idle. Both worker processes died with a traceback and were restarted by the Docker restart policy. The idle one crashed inside `claim` with `psycopg.errors.AdminShutdown: terminating connection due to administrator command`. The leaseholder logged `heartbeat errored`, `renew errored`, then crashed after its build finished, in the `complete` call. The build was still recovered, by the reaper and the other worker as attempt 2, 17 s after the restart, and nothing completed twice.
+
+**Why it matters.** Correctness held, but every database blip cost a full lease plus a process restart per worker, and under Compose a container stopped the wrong way is not restarted at all (see the study notes on restart policy), so one blip could leave the pool permanently short. In production the symptom is a fleet of worker pods restarting in unison every time the database fails over, with the builds table showing a burst of attempt increments.
+
+**Cause.** Two unguarded paths. The main loop's `claim` had no error handling at all: it was outside any `try`, so an idle worker died on the first failed statement. The leaseholder's `complete` ran in `_publish`, after the `try` from bug 5 had ended, so a connection error there escaped too. And the renewer treated an *errored* renew as a transient to retry forever, with no notion that past the lease deadline ownership can no longer be assumed.
+
+**Fix (decision 48).** A connection error while idle logs, reconnects with backoff, and continues. `complete`, `fail` and `release` run through one helper that retries on connection errors until the lease deadline (the last successful claim or renew plus the lease length) and then stops touching the row, logging it as lost, because by then the reaper may have requeued it. A renew that errors is not a rejection: it keeps retrying until the same deadline, after which the lease is assumed lost and the build is cancelled. The heartbeat reconnects. psycopg marks a broken connection `closed`, so each thread's store simply reconnects.
+
+**Lesson.** "No exit while holding a lease" has to cover connection loss, not just exceptions from the build. And an error is not a rejection: a rejected renew means someone else owns the build; an errored renew means you don't know, and the only honest deadline for "I don't know" is the lease itself.
+
+---
+
+## 6. Concurrent duplicates of a round's last build were refused as "round full"
+
+**Found:** 2026-10-05, by the Compose cross-check agent. Fixed in [`422d722`](https://github.com/arqbca11/KubernetesGPU/commit/422d722), the `SubmitBuild` hunk of `scheduler/store/store.go`. **Related:** entry 4 (the same snapshot-before-lock mechanism, one statement earlier).
+
+**Symptom.** A round with two slots, one taken. Eight identical submits of the second shard's build fired at once. One got 201. The other seven got `409 round already has n_shards builds` instead of `200 created:false`. In a round with spare capacity the same burst was handled correctly every time. A shard retrying its submit after a client timeout, as the round's last shard, would have been told the round was full rather than given its stored decision.
+
+**Cause.** After bug 4, `SubmitBuild` locked the round row and then counted builds in a fresh statement. But the duplicate check, `SELECT EXISTS … WHERE build_id = $1`, still ran *before* the lock. The seven losers evaluated it from a snapshot taken before the winner committed, saw no build, waited for the lock, and then counted one build in a one-slot round. Full. The fix for bug 4 had moved the count after the lock and left the existence check where it was.
+
+**Fix.** Lock first, then every check in its own statement: existence, then finished, then count. A losing twin now sees the winner's row and returns "not inserted," which the API turns into the idempotent 200.
+
+**Lesson.** When a fix moves one check behind a lock, look at every other check in the same transaction. Bug 4's fix was correct and incomplete, and the same cross-check method that found 4 found 6 three days later by testing a different race.
+
+---
+
 ## 5. A builder exception crashed the worker with the lease held: a poison-pill build
 
 **Found:** 2026-10-04, by the cross-check agent running the worker as a black-box process. Fixed the same day in [`9f206d0`](https://github.com/arqbca11/KubernetesGPU/commit/9f206d0); the fix is the `_work` hunk of `worker/kgpu_worker/worker.py` plus `validate` in `config.py` and the exit-2 handling in `__main__.py`. (Bundled with the rest of that cross-check round; later bug fixes get their own commit.)

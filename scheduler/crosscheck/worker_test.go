@@ -121,8 +121,11 @@ func TestWorkerTextLogFormatCarriesBuildFields(t *testing.T) {
 	e.waitBuild(t, id, 10*time.Second, "done", func(b store.BuildRow) bool { return b.State == "done" })
 	time.Sleep(200 * time.Millisecond)
 	var buildLines []string
+	// Match build_id=<id> with a boundary, not the bare id: a bare "0:22" also
+	// matches a timestamp like 00:22:20 (this bit once, when round 22 ran at 00:22).
+	re := buildRE(id)
 	for _, ln := range strings.Split(w.stdout.String(), "\n") {
-		if strings.Contains(ln, id) {
+		if re.MatchString(ln) {
 			buildLines = append(buildLines, ln)
 		}
 		if strings.HasPrefix(strings.TrimSpace(ln), "{") {

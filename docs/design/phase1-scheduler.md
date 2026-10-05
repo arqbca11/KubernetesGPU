@@ -204,6 +204,9 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 20 | Cost model v0 lives in `scheduler/costmodel` as pure functions of `n_vectors` and `dim`, with every constant overridable by env; the submit response returns the CPU and GPU estimates | Hard-code sleep times in the worker and shard | One source for the numbers the scheduler, shard and worker all need. The shard sleeps for `cpu_build_ms` on a local build; the Python worker reimplements the same formulas and must stay in step. |
 | 21 | Standard-library HTTP only: `net/http` with Go 1.22 method-and-pattern routing, `encoding/json`, `log/slog` | A router or web framework | Eight routes do not justify a dependency. `DisallowUnknownFields` on request bodies catches client typos early. |
 | 22 | Scheduler image is a two-stage build onto `distroless/static`, running as non-root | Alpine or Debian runtime image | The binary is static; distroless has no shell or package manager, so the attack surface and image size are minimal. Health checks therefore go through the HTTP endpoint, not a shell command. |
+| 48 | **The worker survives lost database connections.** Idle: reconnect with backoff and continue. Holding a lease: `complete`, `fail` and `release` retry on connection errors until the lease deadline (last successful claim or renew plus `LEASE_SECONDS`), then stop touching the row and log it as lost. A renew that *errors* keeps retrying until that deadline, then the lease is assumed lost and the build cancelled; a renew that is *rejected* (zero rows) is a lost lease at once (decision 36). Heartbeat reconnects | Crash and rely on the restart policy (what happened); retry forever | Bug log 7. An error is not a rejection: after a rejection someone else owns the build; after an error you don't know, and the lease deadline is the only honest bound on "don't know". Crashing cost a lease and a restart per blip and, under Compose, could leave the pool short for good. |
+| 49 | **A worker deregisters on a clean exit** (`DELETE FROM workers`), so pool state stops counting it at once instead of after `WORKER_STALE_AFTER` | Rely on staleness | Scale-down and `docker stop` otherwise overcount the pool for up to the stale window; the policy would place on capacity that has left. A crash still relies on staleness, which is what the window is for. |
+| 50 | **Operational clarifications from the Compose cross-check:** `SHUTDOWN_FINISH_BUDGET_SECONDS` must be comfortably under the container's `stop_grace_period` (Compose: 5 s against 15 s), or the finish branch gets SIGKILLed; a clean release is counted as `builds_released`, never as lost; `WORKER_ID` names the worker *slot* (a restarted container reuses its hostname), so `lease_owner` cannot distinguish a dead process from its replacement, which is fine for fencing (attempts do that) and for pool state; a reap happens within one `REAP_INTERVAL` of the lease deadline | | Stated so the spec says it. |
 | 23 | A shard learns that its GPU build is done by polling `GET /builds/{id}` at a configurable interval, only while it has a `needs_index` job waiting and nothing else to run | Worker notifies the shard; scheduler pushes to the shard; long polling backed by `LISTEN/NOTIFY` | Workers talk only to Postgres, and the scheduler learns of GPU completions only from Postgres, so the shard asking is the only path that adds no new state or address book. The shard is blocked anyway, so polling costs it nothing. Added latency is at most one interval per shard and is recorded in the timeline so it is visible. OpenSearch's data nodes poll their remote build service the same way. Long polling is the upgrade if Phase 3 shows the artifact matters; the endpoint is shaped so the shard logic does not change. Chosen by the owner on 2026-10-02. |
 | 24 | `started_at` on a build means "when the current attempt started"; reap and release clear it along with the lease columns, and `enqueued_at` keeps the submit time | Keep the first attempt's start | The timeline wants the winning attempt's duration, and work lost to abandoned attempts is `finished_at - enqueued_at` minus the last attempt. One column cannot hold both; this reading is simpler. (Cross-check gap 1.) |
 | 25 | `Renew` has no `lease_until > now()` check: a worker that wakes after expiry but before the reaper acts may renew and continue | Reject renew once the deadline has passed | No one else owns the row until the reaper or a claimer acts, so continuing is safe and keeps the work. The lease is lost exactly when `attempt` stops matching. (Cross-check gap 2.) |
@@ -338,11 +341,14 @@ Log vocabulary (the `msg` field; tests may match on these):
 
 | `msg` | When |
 | --- | --- |
-| `worker starting`, `registered`, `worker stopped` | Lifecycle; `worker stopped` carries `builds_done` and `builds_lost` |
+| `worker starting`, `registered`, `worker stopped` | Lifecycle; `worker stopped` carries `builds_done`, `builds_lost` (ownership lost to fencing) and `builds_released` (handed back on shutdown) |
 | `claimed` | After a successful claim; carries `estimate_s` |
 | `renew rejected: lease lost, cancelling build` | Renewer saw zero rows (WARN) |
 | `lost ownership` | Main thread gave up on the build; `why` says which write was rejected (WARN) |
 | `completed`, `marked failed` | The guarded write succeeded; `marked failed` carries `reason` |
+| `postgres unavailable while idle, reconnecting`, `postgres unavailable during renew/complete/fail/release/heartbeat, reconnecting` | A connection error; the worker reconnects (WARN, decision 48) |
+| `renew failing past the lease deadline: assuming the lease is lost, cancelling build` | Connection errors outlasted the lease (WARN) |
+| `deregistered` | Clean exit removed the `workers` row (decision 49) |
 | `build failed` | The exception, with traceback (ERROR) |
 | `shutdown requested` | SIGTERM/SIGINT; `why` |
 | `finishing current build before exit`, `cancelling current build to release it` | Decision 37; both carry `remaining_s` and `budget_s` |
@@ -370,6 +376,17 @@ What the script does and what it showed (2026-10-05 run):
 | 6 | Resubmit the finished build with a different body | 200, `created:false`, the stored decision. Roadmap failure test 4. |
 
 All four roadmap failure tests pass on the Compose stack. Step 6 repeats them with the shard simulator generating the load, and step 7 at 50 shards.
+
+### Cross-check of step 4, the Compose stack (2026-10-05)
+
+A fresh agent wrote 9 Go tests (10 cases) that bring up their own copy of the stack under project `kgpu-xcheck` and drive it only through the API and the `docker` CLI. 7 cases passed, 3 failed. Passing cases of note: `docker stop` on a leaseholder with a long remainder released the build and another worker re-claimed it within 0.4 s, before the lease would have expired; with a short remainder the build was finished before exit; a lease that expired while the scheduler was *stopped* was reaped exactly once by the next scheduler; `--scale worker=3` gave three simultaneous leases by three distinct owners.
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** Eight simultaneous submits of one build into a round's last slot: one 201, seven 409 "round full" instead of 200 `created:false`. | Bug log 6, commit `422d722`: the duplicate check moved after the round lock, like the count. Store test with five trials. |
+| **Bug.** `docker compose restart postgres` crashed both workers with tracebacks; the build was still recovered by the reaper as attempt 2. | Bug log 7, decision 48: reconnect while idle, retry guarded writes until the lease deadline, errored renews are not rejections. Python test kills every backend connection mid-build with `pg_terminate_backend`; the worker keeps its lease and completes attempt 1. |
+| **Spec was wrong.** The agent's kill test asserted that `docker kill` is followed by a restart, as decision 47 and the step 4 table then claimed. It is not: Docker treats `docker kill` as a manual stop. | The implementer had found the same thing hours earlier (see decision 47); the agent's test was updated to crash the worker's own process from inside the container, which the restart policy does recover. Both findings agree. |
+| Budget vs grace period; releases counted as lost; no deregistration on clean exit; `WORKER_ID` reused across restarts; errored vs rejected renew; reap timing bound. | Decisions 48 to 50. |
 
 ### Cross-check of step 3, the worker (2026-10-04)
 

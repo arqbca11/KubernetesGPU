@@ -1,0 +1,306 @@
+== Go tests against a throwaway Postgres
+date:      2026-10-05 00:19:03 PDT
+commit:    51716f8 (uncommitted changes)
+go:        go1.27.1
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-60133, port 24657)
+go:        go test -p 1 -count=1 -v -run Compose -timeout 25m ./scheduler/crosscheck/
+python:    skipped
+
+Lines starting with 'store_test.go:N:' are the test narrating what it did.
+Lines tagged [db] are the build row as Postgres had it at that moment.
+
+== go test
+=== RUN   TestComposeKill9LeaseholderMidBuild
+    compose_test.go:52: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.7s)
+    compose_test.go:52: [setup] docker server 29.8.1
+    compose_test.go:52: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 2 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 2 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 7 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up 10 seconds (healthy)
+    compose_test.go:53: [api] POST /rounds n_shards=1 -> 201 round_id=1
+    compose_test.go:54: [api] POST /builds round=1 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:1","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:55: gpu_total_ms=65519, so the fake build lasts about 6.55s at FAKE_TIME_SCALE=10
+    compose_test.go:56: [api] +0.0s build_id=0:1 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:56: [api] +0.4s build_id=0:1 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:59: leaseholder is kgpu-xcheck-worker-2 (lease_owner=b618468aee21); crashing its worker process with SIGKILL 2s into the build
+    compose_test.go:67: [docker] SIGKILL to the python process inside kgpu-xcheck-worker-2; kgpu-xcheck-worker-2(b618468aee21):Up 4 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 4 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 10 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up 12 seconds (healthy)
+    compose_test.go:69: [api] +0.0s build_id=0:1 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:69: [api] +5.1s build_id=0:1 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:69: [api] +5.3s build_id=0:1 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:69: [api] +11.9s build_id=0:1 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:19:34.193
+    compose_test.go:70: terminal 11.9s after the kill: build_id=0:1 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:19:34.193
+    compose_test.go:78: [log scheduler] time=2026-10-05T07:19:27.381Z level=WARN msg="lease expired, build back to queued" build_id=0:1 round_id=1 attempt=1 lease_owner=b618468aee21
+    compose_test.go:86: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:19:34.195 INFO  completed build_id=0:1 attempt=2 round_id=1 kind=fake index_bytes=1280000000 elapsed_s=6.56
+    compose_test.go:98: [docker] kgpu-xcheck-worker-2 came back: running=true started_at=2026-10-05T07:19:22.459879919Z restart_count=1 (decision 47)
+    compose_test.go:109: [api] GET /workers: live_workers=2
+--- PASS: TestComposeKill9LeaseholderMidBuild (29.84s)
+=== RUN   TestComposePauseLeaseholderPastLease
+    compose_test.go:116: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.6s)
+    compose_test.go:116: [setup] docker server 29.8.1
+    compose_test.go:116: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 13 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 18 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 23 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up 26 seconds (healthy)
+    compose_test.go:117: [api] POST /rounds n_shards=1 -> 201 round_id=2
+    compose_test.go:118: [api] POST /builds round=2 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:2","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:119: [api] +0.0s build_id=0:2 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:119: [api] +0.1s build_id=0:2 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:125: [docker] pause kgpu-xcheck-worker-2 (SIGSTOP via the freezer) 1s into a 6.55s build, for 8s against a 5s lease
+    compose_test.go:127: [api] +0.0s build_id=0:2 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:127: [api] +5.1s build_id=0:2 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:127: [api] +5.5s build_id=0:2 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:137: [docker] unpause kgpu-xcheck-worker-2 after 8.1s; row now: build_id=0:2 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:151: [log kgpu-xcheck-worker-2] 07:19:36.201 INFO  claimed build_id=0:2 attempt=1 round_id=2 n_vectors=2000000 dim=128 estimate_s=6.55
+    compose_test.go:151: [log kgpu-xcheck-worker-2] 07:19:45.413 WARNING renew rejected: lease lost, cancelling build build_id=0:2 attempt=1 round_id=2
+    compose_test.go:151: [log kgpu-xcheck-worker-2] 07:19:45.414 WARNING lost ownership build_id=0:2 attempt=1 round_id=2 why=lease was lost during the build; not completing
+    compose_test.go:157: [api] +0.0s build_id=0:2 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:157: [api] +3.9s build_id=0:2 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:19:49.315
+    compose_test.go:164: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:19:49.317 INFO  completed build_id=0:2 attempt=2 round_id=2 kind=fake index_bytes=1280000000 elapsed_s=6.55
+    compose_test.go:173: row 2s later is unchanged: build_id=0:2 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:19:49.315
+--- PASS: TestComposePauseLeaseholderPastLease (17.16s)
+=== RUN   TestComposeSchedulerRestartMidRound
+    compose_test.go:179: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.8s)
+    compose_test.go:179: [setup] docker server 29.8.1
+    compose_test.go:179: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 30 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 35 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 41 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up 43 seconds (healthy)
+    compose_test.go:180: [api] POST /rounds n_shards=2 -> 201 round_id=3
+    compose_test.go:181: [api] POST /builds round=3 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:182: [api] +0.0s build_id=0:3 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:182: [api] +0.1s build_id=0:3 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:184: restarting the scheduler while 0:3 is leased by b618468aee21
+    compose_test.go:185: [docker] compose restart scheduler (0.3s)
+    compose_test.go:187: [api] /healthz 200 again 0.0s after `compose restart` returned
+    compose_test.go:189: [api] +0.0s build_id=0:3 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:189: [api] +5.3s build_id=0:3 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:00.044
+    compose_test.go:193: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:00.046 INFO  completed build_id=0:3 attempt=1 round_id=3 kind=fake index_bytes=1280000000 elapsed_s=6.56
+    compose_test.go:199: [api] POST /builds round=3 shard=0 n_vectors=100000 -> 200 {"build_id":"0:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":2048000000,"created":false,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:203: [api] POST /builds round=3 shard=1 n_vectors=100000 -> 201 {"build_id":"1:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:204: [api] +0.0s build_id=1:3 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:204: [api] +0.2s build_id=1:3 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:204: [api] +0.6s build_id=1:3 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:00.846
+    compose_test.go:205: [api] POST /builds round=3 shard=2 n_vectors=100000 -> 409 {"error":"round already has n_shards builds"}
+    compose_test.go:217: [api] POST /shards/3/0/report stream_done=true -> 200 {"build":{"build_id":"0:3","placement":"gpu","state":"done","attempt":1}}
+    compose_test.go:217: [api] POST /shards/3/1/report stream_done=true -> 200 {"build":{"build_id":"1:3","placement":"gpu","state":"done","attempt":1}}
+    compose_test.go:236: [api] round 3 finished_at=2026-10-05T07:20:00.846445Z, latest build finish=2026-10-05T07:20:00.846445Z
+    compose_test.go:241: [log kgpu-xcheck-worker-2(b618468aee21)] 07:19:53.486 INFO  claimed build_id=0:3 attempt=1 round_id=3 n_vectors=2000000 dim=128 estimate_s=6.55
+    compose_test.go:241: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:00.046 INFO  completed build_id=0:3 attempt=1 round_id=3 kind=fake index_bytes=1280000000 elapsed_s=6.56
+    compose_test.go:241: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:19:53.455Z level=INFO msg="build placed" build_id=0:3 round_id=3 attempt=0 shard_id=0 placement=gpu priority=0 policy=always_gpu reason=always_gpu n_vectors=2000000 dim=128 mem_bytes=2048000000 live_workers=2
+    compose_test.go:241: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:20:00.266Z level=INFO msg="duplicate submit ignored" build_id=0:3 round_id=3 attempt=1 placement=gpu
+--- PASS: TestComposeSchedulerRestartMidRound (9.45s)
+=== RUN   TestComposeReaperResumesAfterSchedulerOutage
+    compose_test.go:247: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.6s)
+    compose_test.go:247: [setup] docker server 29.8.1
+    compose_test.go:247: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 40 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 45 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 7 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up 52 seconds (healthy)
+    compose_test.go:248: [api] POST /rounds n_shards=1 -> 201 round_id=4
+    compose_test.go:249: [api] POST /builds round=4 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:4","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:250: [api] +0.0s build_id=0:4 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:250: [api] +0.2s build_id=0:4 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:253: [docker] compose stop scheduler (0.2s)
+    compose_test.go:255: [docker] scheduler stopped, then leaseholder kgpu-xcheck-worker-1 SIGKILLed; waiting 8s so the 5s lease expires with no reaper running
+    compose_test.go:257: [docker] compose start scheduler (0.7s)
+    compose_test.go:258: [api] /healthz 200 0.0s after start
+    compose_test.go:260: [api] +0.0s build_id=0:4 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:260: [api] +1.0s build_id=0:4 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:260: [api] +1.2s build_id=0:4 placement=gpu state=leased attempt=2 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:260: [api] +7.8s build_id=0:4 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:20:19.722
+    compose_test.go:266: [log scheduler] time=2026-10-05T07:20:12.979Z level=WARN msg="lease expired, build back to queued" build_id=0:4 round_id=4 attempt=1 lease_owner=ca4634e9b915
+    compose_test.go:271: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:19.723 INFO  completed build_id=0:4 attempt=2 round_id=4 kind=fake index_bytes=1280000000 elapsed_s=6.56
+--- PASS: TestComposeReaperResumesAfterSchedulerOutage (18.88s)
+=== RUN   TestComposeDuplicateSubmit
+    compose_test.go:276: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.7s)
+    compose_test.go:276: [setup] docker server 29.8.1
+    compose_test.go:276: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 59 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up Less than a second; kgpu-xcheck-scheduler-1(63966b526f07):Up 9 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:277: [api] POST /rounds n_shards=2 -> 201 round_id=5
+    compose_test.go:278: [api] POST /builds round=5 shard=0 n_vectors=100000 -> 201 {"build_id":"0:5","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:279: [api] +0.0s build_id=0:5 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:279: [api] +0.1s build_id=0:5 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:279: [api] +0.5s build_id=0:5 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:22.217
+    compose_test.go:283: [api] POST /builds round=5 shard=0 n_vectors=2000000 -> 200 {"build_id":"0:5","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":102400000,"created":false,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:290: row 2s after the duplicate: build_id=0:5 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:22.217 n_vectors=100000
+    compose_test.go:310: [last slot, rep 0] 8 simultaneous submits of 1:5: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:5 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.5s build_id=1:5 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:315: [api] +1.0s build_id=1:5 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:25.204
+    compose_test.go:319: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:25.206 INFO  completed build_id=1:5 attempt=1 round_id=5 kind=fake index_bytes=64000000 elapsed_s=0.47
+    compose_test.go:306: [api] POST /rounds n_shards=2 -> 201 round_id=6
+    compose_test.go:307: [api] POST /builds round=6 shard=0 n_vectors=100000 -> 201 {"build_id":"0:6","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [last slot, rep 1] 8 simultaneous submits of 1:6: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:6 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:6 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:6 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:26.217
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:26.219 INFO  completed build_id=1:6 attempt=1 round_id=6 kind=fake index_bytes=64000000 elapsed_s=0.47
+    compose_test.go:306: [api] POST /rounds n_shards=2 -> 201 round_id=7
+    compose_test.go:307: [api] POST /builds round=7 shard=0 n_vectors=100000 -> 201 {"build_id":"0:7","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [last slot, rep 2] 8 simultaneous submits of 1:7: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:7 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:7 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:7 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:27.193
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:27.195 INFO  completed build_id=1:7 attempt=1 round_id=7 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:306: [api] POST /rounds n_shards=2 -> 201 round_id=8
+    compose_test.go:307: [api] POST /builds round=8 shard=0 n_vectors=100000 -> 201 {"build_id":"0:8","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [last slot, rep 3] 8 simultaneous submits of 1:8: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:8 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:8 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.9s build_id=1:8 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:28.169
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:28.171 INFO  completed build_id=1:8 attempt=1 round_id=8 kind=fake index_bytes=64000000 elapsed_s=0.47
+    compose_test.go:306: [api] POST /rounds n_shards=2 -> 201 round_id=9
+    compose_test.go:307: [api] POST /builds round=9 shard=0 n_vectors=100000 -> 201 {"build_id":"0:9","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [last slot, rep 4] 8 simultaneous submits of 1:9: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:9 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.3s build_id=1:9 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:9 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:29.145
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:29.146 INFO  completed build_id=1:9 attempt=1 round_id=9 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:321: [last slot] 0 of 5 bursts violated the promise
+    compose_test.go:306: [api] POST /rounds n_shards=8 -> 201 round_id=10
+    compose_test.go:307: [api] POST /builds round=10 shard=0 n_vectors=100000 -> 201 {"build_id":"0:10","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [spare capacity, rep 0] 8 simultaneous submits of 1:10: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:10 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:10 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:10 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:30.113
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:30.114 INFO  completed build_id=1:10 attempt=1 round_id=10 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:306: [api] POST /rounds n_shards=8 -> 201 round_id=11
+    compose_test.go:307: [api] POST /builds round=11 shard=0 n_vectors=100000 -> 201 {"build_id":"0:11","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [spare capacity, rep 1] 8 simultaneous submits of 1:11: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:11 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:11 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:11 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:31.084
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:31.085 INFO  completed build_id=1:11 attempt=1 round_id=11 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:306: [api] POST /rounds n_shards=8 -> 201 round_id=12
+    compose_test.go:307: [api] POST /builds round=12 shard=0 n_vectors=100000 -> 201 {"build_id":"0:12","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [spare capacity, rep 2] 8 simultaneous submits of 1:12: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:12 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:12 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:12 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:32.053
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:32.054 INFO  completed build_id=1:12 attempt=1 round_id=12 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:306: [api] POST /rounds n_shards=8 -> 201 round_id=13
+    compose_test.go:307: [api] POST /builds round=13 shard=0 n_vectors=100000 -> 201 {"build_id":"0:13","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [spare capacity, rep 3] 8 simultaneous submits of 1:13: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:13 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:13 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.8s build_id=1:13 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:33.022
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:33.023 INFO  completed build_id=1:13 attempt=1 round_id=13 kind=fake index_bytes=64000000 elapsed_s=0.46
+    compose_test.go:306: [api] POST /rounds n_shards=8 -> 201 round_id=14
+    compose_test.go:307: [api] POST /builds round=14 shard=0 n_vectors=100000 -> 201 {"build_id":"0:14","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:310: [spare capacity, rep 4] 8 simultaneous submits of 1:14: 1 created, 7 duplicates (200), others: []
+    compose_test.go:315: [api] +0.0s build_id=1:14 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:315: [api] +0.4s build_id=1:14 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:315: [api] +0.9s build_id=1:14 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:33.993
+    compose_test.go:319: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:33.994 INFO  completed build_id=1:14 attempt=1 round_id=14 kind=fake index_bytes=64000000 elapsed_s=0.47
+    compose_test.go:321: [spare capacity] 0 of 5 bursts violated the promise
+    compose_test.go:323: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:22.218 INFO  completed build_id=0:5 attempt=1 round_id=5 kind=fake index_bytes=64000000 elapsed_s=0.47
+--- PASS: TestComposeDuplicateSubmit (14.36s)
+=== RUN   TestComposeDockerStopLeaseholder
+=== RUN   TestComposeDockerStopLeaseholder/LongRemainderIsReleased
+    compose_test.go:330: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.7s)
+    compose_test.go:330: [setup] docker server 29.8.1
+    compose_test.go:330: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up About a minute; kgpu-xcheck-worker-1(ca4634e9b915):Up 14 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 24 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:331: [api] POST /rounds n_shards=1 -> 201 round_id=15
+    compose_test.go:332: [api] POST /builds round=15 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:15","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:333: [api] +0.0s build_id=0:15 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:333: [api] +0.5s build_id=0:15 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:337: [docker] stop kgpu-xcheck-worker-2 0.5s into a 6.55s build: about 6s remain against SHUTDOWN_FINISH_BUDGET_SECONDS=5, so decision 37 says cancel and release
+    compose_test.go:342: [docker] stop returned after 0.2s; state: exited 0 false
+    compose_test.go:346: [api] +0.0s build_id=0:15 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:346: [api] +0.2s build_id=0:15 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:348: attempt 2 claimed 0.5s after `docker stop` was issued (lease is 5s)
+    compose_test.go:355: [log kgpu-xcheck-worker-2] 07:20:36.513 INFO  claimed build_id=0:15 attempt=1 round_id=15 n_vectors=2000000 dim=128 estimate_s=6.55
+    compose_test.go:355: [log kgpu-xcheck-worker-2] 07:20:37.148 INFO  shutdown requested why=signal 15
+    compose_test.go:355: [log kgpu-xcheck-worker-2] 07:20:37.148 INFO  cancelling current build to release it build_id=0:15 attempt=1 round_id=15 remaining_s=5.94 budget_s=5.0
+    compose_test.go:355: [log kgpu-xcheck-worker-2] 07:20:37.229 INFO  released back to queue build_id=0:15 attempt=1 round_id=15 why=build 0:15 attempt 1 cancelled at 11%
+    compose_test.go:355: [log kgpu-xcheck-worker-2] 07:20:37.230 INFO  worker stopped worker_id=b618468aee21 builds_done=13 builds_lost=1 builds_released=1
+    compose_test.go:371: [api] +0.0s build_id=0:15 placement=gpu state=leased attempt=2 lease_owner=ca4634e9b915 finished_at=<nil>
+    compose_test.go:371: [api] +6.5s build_id=0:15 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=07:20:44.081
+    compose_test.go:375: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:44.086 INFO  completed build_id=0:15 attempt=2 round_id=15 kind=fake index_bytes=1280000000 elapsed_s=6.56
+=== RUN   TestComposeDockerStopLeaseholder/ShortRemainderIsFinished
+    compose_test.go:385: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.7s)
+    compose_test.go:385: [setup] docker server 29.8.1
+    compose_test.go:385: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 2 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 26 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 35 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:386: [api] POST /rounds n_shards=1 -> 201 round_id=16
+    compose_test.go:387: [api] POST /builds round=16 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:16","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:388: [api] +0.0s build_id=0:16 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:388: [api] +0.2s build_id=0:16 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:392: [docker] stop kgpu-xcheck-worker-2 3s into a 6.55s build: about 3.5s remain, within the 5s budget, so decision 37 says finish
+    compose_test.go:397: [docker] stop returned after 3.5s; state: exited 0
+    compose_test.go:402: [api] right after the container exited: build_id=0:16 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:20:54.099
+    compose_test.go:408: [log kgpu-xcheck-worker-2] 07:20:47.546 INFO  claimed build_id=0:16 attempt=1 round_id=16 n_vectors=2000000 dim=128 estimate_s=6.55
+    compose_test.go:408: [log kgpu-xcheck-worker-2] 07:20:50.710 INFO  finishing current build before exit build_id=0:16 attempt=1 round_id=16 remaining_s=3.48 budget_s=5.0
+    compose_test.go:408: [log kgpu-xcheck-worker-2] 07:20:54.100 INFO  completed build_id=0:16 attempt=1 round_id=16 kind=fake index_bytes=1280000000 elapsed_s=6.55
+    compose_test.go:413: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:54.100 INFO  completed build_id=0:16 attempt=1 round_id=16 kind=fake index_bytes=1280000000 elapsed_s=6.55
+--- PASS: TestComposeDockerStopLeaseholder (20.36s)
+    --- PASS: TestComposeDockerStopLeaseholder/LongRemainderIsReleased (11.40s)
+    --- PASS: TestComposeDockerStopLeaseholder/ShortRemainderIsFinished (8.96s)
+=== RUN   TestComposeScaleToThreeWorkers
+    compose_test.go:422: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.6s)
+    compose_test.go:422: [setup] docker server 29.8.1
+    compose_test.go:422: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 1 second; kgpu-xcheck-worker-1(ca4634e9b915):Up 35 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 44 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:424: [docker] compose up -d --wait --no-recreate --scale worker=3 (1.8s)
+    compose_test.go:430: [api] GET /workers: live_workers=3 registered=[78783fcab71f b618468aee21 ca4634e9b915]; docker: kgpu-xcheck-worker-3(78783fcab71f):Up Less than a second; kgpu-xcheck-worker-2(b618468aee21):Up 3 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 37 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 46 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:432: [api] POST /rounds n_shards=3 -> 201 round_id=17
+    compose_test.go:435: [api] POST /builds round=17 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:17","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:435: [api] POST /builds round=17 shard=1 n_vectors=2000000 -> 201 {"build_id":"1:17","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:435: [api] POST /builds round=17 shard=2 n_vectors=2000000 -> 201 {"build_id":"2:17","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:452: [api] simultaneously: build_id=0:17 placement=gpu state=leased attempt=1 lease_owner=78783fcab71f finished_at=<nil> started_at=07:20:58.195
+    compose_test.go:452: [api] simultaneously: build_id=1:17 placement=gpu state=leased attempt=1 lease_owner=ca4634e9b915 finished_at=<nil> started_at=07:20:58.204
+    compose_test.go:452: [api] simultaneously: build_id=2:17 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil> started_at=07:20:58.508
+    compose_test.go:465: [api] +0.0s build_id=0:17 placement=gpu state=leased attempt=1 lease_owner=78783fcab71f finished_at=<nil>
+    compose_test.go:465: [api] +6.2s build_id=0:17 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:04.749
+    compose_test.go:469: [log kgpu-xcheck-worker-3(78783fcab71f)] 07:21:04.750 INFO  completed build_id=0:17 attempt=1 round_id=17 kind=fake index_bytes=1280000000 elapsed_s=6.55
+    compose_test.go:465: [api] +0.0s build_id=1:17 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:04.760
+    compose_test.go:469: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:21:04.761 INFO  completed build_id=1:17 attempt=1 round_id=17 kind=fake index_bytes=1280000000 elapsed_s=6.55
+    compose_test.go:465: [api] +0.0s build_id=2:17 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:465: [api] +0.1s build_id=2:17 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:05.070
+    compose_test.go:469: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:05.072 INFO  completed build_id=2:17 attempt=1 round_id=17 kind=fake index_bytes=1280000000 elapsed_s=6.56
+    compose_test.go:473: [docker] compose up -d --no-recreate --scale worker=2 (1.2s)
+    compose_test.go:475: [api] pool back to 2 live workers 1.2s after scaling down (WORKER_STALE_AFTER=5s); docker: kgpu-xcheck-worker-2(b618468aee21):Up 12 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 45 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 54 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+--- PASS: TestComposeScaleToThreeWorkers (13.04s)
+=== RUN   TestComposePostgresRestartMidBuild
+    compose_test.go:481: [docker] compose up -d --wait --no-recreate --scale worker=2 (1.7s)
+    compose_test.go:481: [setup] docker server 29.8.1
+    compose_test.go:481: [setup] stack kgpu-xcheck up: kgpu-xcheck-worker-2(b618468aee21):Up 15 seconds; kgpu-xcheck-worker-1(ca4634e9b915):Up 48 seconds; kgpu-xcheck-scheduler-1(63966b526f07):Up 57 seconds (healthy); kgpu-xcheck-postgres-1(648c16ebfb77):Up About a minute (healthy)
+    compose_test.go:482: [api] POST /rounds n_shards=1 -> 201 round_id=18
+    compose_test.go:483: [api] POST /builds round=18 shard=0 n_vectors=2000000 -> 201 {"build_id":"0:18","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":2048000000,"created":true,"cpu_build_ms":519990,"gpu_total_ms":65519}
+    compose_test.go:484: [api] +0.0s build_id=0:18 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:484: [api] +0.2s build_id=0:18 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:490: restarting postgres while 0:18 is leased by b618468aee21
+    compose_test.go:491: [docker] compose restart postgres (0.3s)
+    compose_test.go:492: [api] /healthz 200 0.2s after postgres restarted
+    compose_test.go:494: [api] +0.0s build_id=0:18 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:494: [api] +5.0s build_id=0:18 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:16.171
+    compose_test.go:498: in-flight build ended as build_id=0:18 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:16.171 (attempt >1 means its lease was lost during the outage and it was reaped)
+    compose_test.go:499: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:16.173 INFO  completed build_id=0:18 attempt=1 round_id=18 kind=fake index_bytes=1280000000 elapsed_s=6.55
+    compose_test.go:501: [docker] kgpu-xcheck-worker-2 restart_count 0 -> 0
+    compose_test.go:501: [docker] kgpu-xcheck-worker-1 restart_count 0 -> 0
+    compose_test.go:501: [docker] kgpu-xcheck-scheduler-1 restart_count 0 -> 0
+    compose_test.go:512: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:19:27.381Z level=WARN msg="lease expired, build back to queued" build_id=0:1 round_id=1 attempt=1 lease_owner=b618468aee21
+    compose_test.go:512: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:19:42.386Z level=WARN msg="lease expired, build back to queued" build_id=0:2 round_id=2 attempt=1 lease_owner=b618468aee21
+    compose_test.go:512: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:20:12.979Z level=WARN msg="lease expired, build back to queued" build_id=0:4 round_id=4 attempt=1 lease_owner=ca4634e9b915
+    compose_test.go:512: [log kgpu-xcheck-scheduler-1] time=2026-10-05T07:21:10.975Z level=ERROR msg="reap failed" err="FATAL: terminating connection due to administrator command (SQLSTATE 57P01)"
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:19:17.560 INFO  worker starting worker_id=b618468aee21 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:19:22.603 INFO  worker starting worker_id=b618468aee21 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:19:45.413 WARNING renew rejected: lease lost, cancelling build build_id=0:2 attempt=1 round_id=2
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:19:45.414 WARNING lost ownership build_id=0:2 attempt=1 round_id=2 why=lease was lost during the build; not completing
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:45.522 INFO  worker starting worker_id=b618468aee21 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:20:54.481 INFO  worker starting worker_id=b618468aee21 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:11.570 WARNING postgres unavailable during heartbeat, reconnecting err=terminating connection due to administrator command
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:11.633 WARNING postgres unavailable during renew, reconnecting build_id=0:18 attempt=1 round_id=18 err=terminating connection due to administrator command
+    compose_test.go:512: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:16.163 WARNING postgres unavailable during complete, reconnecting build_id=0:18 attempt=1 round_id=18 err=terminating connection due to administrator command
+    compose_test.go:512: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:19:17.583 INFO  worker starting worker_id=ca4634e9b915 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:20:21.205 INFO  worker starting worker_id=ca4634e9b915 mem_bytes=8589934592 builder=fake lease_s=5.0 renew_interval_s=1.0
+    compose_test.go:512: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:21:11.318 WARNING postgres unavailable while idle, reconnecting err=terminating connection due to administrator command
+    compose_test.go:512: [log kgpu-xcheck-worker-1(ca4634e9b915)] 07:21:11.405 WARNING postgres unavailable during heartbeat, reconnecting err=terminating connection due to administrator command
+    compose_test.go:523: [api] pool: live_workers=2
+    compose_test.go:529: [api] POST /rounds n_shards=1 -> 201 round_id=19
+    compose_test.go:530: [api] POST /builds round=19 shard=0 n_vectors=100000 -> 201 {"build_id":"0:19","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
+    compose_test.go:531: [api] +0.0s build_id=0:19 placement=gpu state=queued attempt=0 lease_owner=<nil> finished_at=<nil>
+    compose_test.go:531: [api] +0.2s build_id=0:19 placement=gpu state=leased attempt=1 lease_owner=b618468aee21 finished_at=<nil>
+    compose_test.go:531: [api] +0.6s build_id=0:19 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=07:21:17.148
+    compose_test.go:535: [log kgpu-xcheck-worker-2(b618468aee21)] 07:21:17.150 INFO  completed build_id=0:19 attempt=1 round_id=19 kind=fake index_bytes=64000000 elapsed_s=0.47
+--- PASS: TestComposePostgresRestartMidBuild (9.59s)
+PASS
+compose down -v --remove-orphans (project kgpu-xcheck): err=<nil>
+ Container kgpu-xcheck-postgres-1 Removed 
+ Network kgpu-xcheck_default Removing 
+ Volume kgpu-xcheck_pgdata Removing 
+ Volume kgpu-xcheck_pgdata Removed 
+ Network kgpu-xcheck_default Removed 
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/crosscheck	133.767s
+
+== Docker events for container kgpu-test-pg-60133
+  00:21:17  kill
+  00:21:17  die
+  00:21:17  destroy
+
+== Result: PASS
