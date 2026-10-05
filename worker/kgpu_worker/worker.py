@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from .builder import Artifact, Builder, Cancelled, Job
 from .config import Config
-from .store import Claimed, Store
+from .store import Claimed, Store, is_connection_error
 
 log = logging.getLogger("kgpu.worker")
 
@@ -37,6 +37,11 @@ class Current:
     lost: threading.Event        # set by the renew thread when a renew is rejected
     progress: float = 0.0
     started: float = 0.0
+    lease_ok_at: float = 0.0     # monotonic time of the last successful claim/renew
+
+    def lease_deadline(self, lease_s: float) -> float:
+        """After this, the reaper may have requeued us: assume ownership is gone."""
+        return self.lease_ok_at + lease_s
 
 
 class Worker:
@@ -48,7 +53,8 @@ class Worker:
         self.current: Current | None = None
         self._lock = threading.Lock()
         self.builds_done = 0                 # for tests and logs
-        self.builds_lost = 0
+        self.builds_lost = 0                 # ownership lost (fencing); never counts a clean release
+        self.builds_released = 0             # handed back on shutdown
 
     # ---- lifecycle ---------------------------------------------------------------
 
@@ -92,14 +98,29 @@ class Worker:
         hb.start()
         try:
             while not self.stopping.is_set():
-                claimed = self.store.claim(self.cfg.worker_id, self.cfg.mem_bytes, self.cfg.lease_s)
+                try:
+                    claimed = self.store.claim(self.cfg.worker_id, self.cfg.mem_bytes, self.cfg.lease_s)
+                except Exception as e:  # noqa: BLE001
+                    if not is_connection_error(e):
+                        raise
+                    # Postgres restarted or the network blinked. Holding no lease,
+                    # the right move is to reconnect and carry on (decision 48).
+                    log.warning("postgres unavailable while idle, reconnecting", extra={"err": str(e).strip()[:200]})
+                    self.store.reconnect()
+                    continue
                 if claimed is None:
                     self.stopping.wait(self.cfg.poll_interval_s)
                     continue
                 self._work(claimed)
         finally:
+            if self.stopping.is_set():
+                try:
+                    self.store.deregister(self.cfg.worker_id)   # clean exit: leave the pool now (decision 49)
+                    log.info("deregistered", extra={"worker_id": self.cfg.worker_id})
+                except Exception:  # noqa: BLE001  stale-worker expiry will handle it
+                    log.warning("could not deregister; the pool will age this worker out")
             log.info("worker stopped", extra={"worker_id": self.cfg.worker_id, "builds_done": self.builds_done,
-                                             "builds_lost": self.builds_lost})
+                                             "builds_lost": self.builds_lost, "builds_released": self.builds_released})
             self.store.close()
 
     # ---- one build ---------------------------------------------------------------
@@ -107,7 +128,8 @@ class Worker:
     def _work(self, c: Claimed) -> None:
         job = Job(build_id=c.build_id, round_id=c.round_id, attempt=c.attempt,
                   n_vectors=c.n_vectors, dim=c.dim, mem_bytes=c.mem_bytes)
-        cur = Current(job=job, cancel=threading.Event(), lost=threading.Event(), started=time.monotonic())
+        now = time.monotonic()
+        cur = Current(job=job, cancel=threading.Event(), lost=threading.Event(), started=now, lease_ok_at=now)
         with self._lock:
             self.current = cur
         tags = self._tags(job)
@@ -133,11 +155,9 @@ class Worker:
         except Exception as e:  # noqa: BLE001  the build (or anything after the claim) failed
             log.exception("build failed", extra=tags)
             reason = f"{type(e).__name__}: {e}"[:500]
-            try:
-                ok = self.store.fail(job.build_id, job.attempt, reason)
-            except Exception:  # noqa: BLE001  database gone too: the reaper will recover the lease
-                log.exception("could not mark failed; leaving it to the reaper", extra=tags)
-                return
+            ok = self._write_until_deadline(cur, lambda: self.store.fail(job.build_id, job.attempt, reason), "fail")
+            if ok is None:
+                return   # already logged as lost
             if ok:
                 log.info("marked failed", extra=tags | {"reason": reason})
             else:
@@ -156,7 +176,10 @@ class Worker:
         if cur.lost.is_set():
             self._lost(tags, "lease was lost during the build; not completing")
             return
-        if self.store.complete(cur.job.build_id, cur.job.attempt):
+        ok = self._write_until_deadline(cur, lambda: self.store.complete(cur.job.build_id, cur.job.attempt), "complete")
+        if ok is None:
+            return
+        if ok:
             self.builds_done += 1
             log.info("completed", extra=tags | {"kind": artifact.kind, "index_bytes": artifact.index_bytes,
                                                 "elapsed_s": round(artifact.elapsed_s, 2)})
@@ -170,10 +193,35 @@ class Worker:
             return
         # Cancelled by shutdown while we still own it: give it back now rather
         # than making the reaper wait for the lease to expire.
-        if self.store.release(cur.job.build_id, cur.job.attempt):
+        ok = self._write_until_deadline(cur, lambda: self.store.release(cur.job.build_id, cur.job.attempt), "release")
+        if ok is None:
+            return
+        if ok:
+            self.builds_released += 1
             log.info("released back to queue", extra=tags | {"why": why})
         else:
             self._lost(tags, "release rejected: stale attempt")
+
+    def _write_until_deadline(self, cur: Current, op, what: str):
+        """Run a guarded write, reconnecting on connection errors, until the
+        lease deadline. Returns the write's bool, or None once the deadline has
+        passed: by then the reaper may have requeued the build, so we stop
+        touching it and log it as lost (decision 48)."""
+        tags = self._tags(cur.job)
+        while True:
+            try:
+                return op()
+            except Exception as e:  # noqa: BLE001
+                if not is_connection_error(e):
+                    raise
+                if time.monotonic() >= cur.lease_deadline(self.cfg.lease_s):
+                    self._lost(tags, f"{what} could not be written before the lease deadline; leaving it to the reaper")
+                    return None
+                log.warning(f"postgres unavailable during {what}, reconnecting", extra=tags | {"err": str(e).strip()[:200]})
+                try:
+                    self.store.reconnect()
+                except Exception:  # noqa: BLE001  connect() retries internally; this is defensive
+                    time.sleep(0.5)
 
     def _lost(self, tags: dict, why: str) -> None:
         self.builds_lost += 1
@@ -189,10 +237,27 @@ class Worker:
             while not cur.cancel.wait(self.cfg.renew_interval_s):
                 try:
                     ok = store.renew(cur.job.build_id, cur.job.attempt, self.cfg.lease_s)
-                except Exception:  # noqa: BLE001  transient db error: try again next tick
-                    log.exception("renew errored", extra=tags)
+                except Exception as e:  # noqa: BLE001
+                    if not is_connection_error(e):
+                        log.exception("renew errored", extra=tags)
+                        continue
+                    # An error is not a rejection: we may still own the lease, but
+                    # we cannot prove it. Keep trying until the deadline; past it
+                    # the reaper may have requeued us, so assume lost (decision 48).
+                    if time.monotonic() >= cur.lease_deadline(self.cfg.lease_s):
+                        log.warning("renew failing past the lease deadline: assuming the lease is lost, cancelling build",
+                                    extra=tags | {"err": str(e).strip()[:200]})
+                        cur.lost.set()
+                        cur.cancel.set()
+                        return
+                    log.warning("postgres unavailable during renew, reconnecting", extra=tags | {"err": str(e).strip()[:200]})
+                    try:
+                        store.reconnect()
+                    except Exception:  # noqa: BLE001
+                        pass
                     continue
                 if ok:
+                    cur.lease_ok_at = time.monotonic()
                     log.debug("renewed", extra=tags)
                 else:
                     log.warning("renew rejected: lease lost, cancelling build", extra=tags)
@@ -209,8 +274,15 @@ class Worker:
             while True:
                 try:
                     store.heartbeat(self.cfg.worker_id, self.cfg.mem_bytes)
-                except Exception:  # noqa: BLE001
-                    log.exception("heartbeat errored")
+                except Exception as e:  # noqa: BLE001
+                    if is_connection_error(e):
+                        log.warning("postgres unavailable during heartbeat, reconnecting", extra={"err": str(e).strip()[:200]})
+                        try:
+                            store.reconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    else:
+                        log.exception("heartbeat errored")
                 if self.stopping.wait(self.cfg.heartbeat_interval_s):
                     return
         finally:

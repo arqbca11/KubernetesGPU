@@ -27,8 +27,18 @@ class Claimed:
     mem_bytes: int
 
 
+def is_connection_error(e: BaseException) -> bool:
+    """True for errors that mean the connection is gone, not that the statement
+    was wrong: server shutdown, network loss, a terminated backend."""
+    return isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError))
+
+
 class Store:
-    """One autocommit connection. Not thread-safe: each thread gets its own Store."""
+    """One autocommit connection. Not thread-safe: each thread gets its own Store.
+
+    After a connection error the caller should `reconnect()`: psycopg marks the
+    connection BAD (`closed` becomes True) and the next statement would fail
+    again. `connect()` retries with backoff until the server is back."""
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
@@ -52,8 +62,15 @@ class Store:
 
     def close(self) -> None:
         if self._conn is not None:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001  already broken
+                pass
             self._conn = None
+
+    def reconnect(self) -> None:
+        self.close()
+        self.connect()
 
     @property
     def conn(self) -> psycopg.Connection:
@@ -69,6 +86,10 @@ class Store:
             return cur.rowcount
 
     # ---- workers --------------------------------------------------------------
+
+    def deregister(self, worker_id: str) -> None:
+        """Remove this worker on a clean exit so pool state stops counting it at once (decision 49)."""
+        self._exec("DELETE FROM workers WHERE worker_id = %s", (worker_id,))
 
     def heartbeat(self, worker_id: str, mem_bytes: int) -> None:
         self._exec(

@@ -98,7 +98,10 @@ def test_sigterm_releases_long_build_and_finishes_short_one(db, dsn):
     t.join(5)
     d = row(db, long_)
     assert d["state"] == "queued" and d["attempt"] == 1 and d["lease_owner"] is None
-    print("the build went back to the queue immediately (no waiting for the reaper), attempt unchanged")
+    assert w.builds_released == 1 and w.builds_lost == 0
+    print("the build went back to the queue immediately (no waiting for the reaper), attempt unchanged; counted as released, not lost")
+    assert db.execute("SELECT count(*) FROM workers WHERE worker_id = 'gpu-term'").fetchone()[0] == 0
+    print("the worker deregistered itself on the clean exit: pool state no longer counts it")
     # Park it so the next worker does not pick the long build up again.
     db.execute("UPDATE builds SET state = 'done', finished_at = now() WHERE build_id = %s", (long_,))
 
@@ -176,3 +179,53 @@ def test_bad_config_is_refused_before_connecting():
             Config.from_env(base | env)
         print(f"  {env} -> ConfigError({e.value})")
         assert msg in str(e.value)
+
+
+def test_survives_lost_database_connections_mid_build(db, dsn):
+    """Postgres restarts (or the network blinks) while a build is in flight.
+    The worker must not crash: it reconnects, keeps renewing, completes the
+    build, and goes on claiming (bug log 7, decision 48)."""
+    r = new_round(db)
+    bid = new_build(db, r, 1, n=5_000_000)      # ~3.4 s at 50x
+    nxt = new_build(db, r, 2, n=20_000)
+    w = make_worker(dsn, "gpu-outage", lease_s=3.0, renew_s=0.3)
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, bid)["state"] == "leased", 5, "claim")
+    print("worker claimed and is building; now every one of its connections is killed server-side")
+    killed = db.execute("""SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
+                           WHERE datname = current_database() AND pid <> pg_backend_pid()""").fetchone()[0]
+    print(f"  terminated {killed} backend connections (main, renewer, heartbeat)")
+    wait_for(lambda: row(db, bid)["state"] == "done", 15, "the in-flight build to complete")
+    d = row(db, bid)
+    assert d["attempt"] == 1, "the worker kept its lease: no reap, no re-claim"
+    wait_for(lambda: row(db, nxt)["state"] == "done", 10, "the next build")
+    assert t.is_alive(), "the worker process survived"
+    w.shutdown("test over"); t.join(5)
+    assert w.builds_done == 2 and w.builds_lost == 0
+    print("reconnected on every thread, renewed in time, completed attempt 1, then claimed and completed the next build")
+
+
+def test_renew_outage_past_lease_deadline_assumes_lost(db, dsn):
+    """If the database stays unreachable past the lease deadline, the worker
+    must assume the reaper has requeued the build and stop touching it."""
+    import kgpu_worker.worker as wk
+    r = new_round(db)
+    bid = new_build(db, r, 1, n=5_000_000)
+    w = make_worker(dsn, "gpu-blackout", lease_s=1.0, renew_s=0.2)
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, bid)["state"] == "leased", 5, "claim")
+    # Make every renew fail with a connection error for longer than the lease.
+    import psycopg
+    real_renew = wk.Store.renew
+    def failing_renew(self, *a, **k):
+        raise psycopg.OperationalError("simulated: server closed the connection unexpectedly")
+    wk.Store.renew = failing_renew
+    try:
+        wait_for(lambda: w.builds_lost == 1, 6, "the worker to give up past the lease deadline")
+    finally:
+        wk.Store.renew = real_renew
+    print("renews failed for longer than the lease: the worker assumed the lease lost and cancelled the build")
+    d = row(db, bid)
+    assert d["state"] == "leased" and d["attempt"] == 1, "it wrote nothing (the real reaper would requeue it)"
+    w.shutdown("test over"); t.join(5)
+    assert w.builds_done == 0

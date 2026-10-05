@@ -1,8 +1,8 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-04 22:38:27 PDT
-commit:    10f9d16 (uncommitted changes)
+date:      2026-10-05 00:11:55 PDT
+commit:    422d722 (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-52657, port 33686)
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-58985, port 29567)
 go:        skipped
 python:    uv run pytest -v -rA (worker/)
 
@@ -16,21 +16,23 @@ cachedir: .pytest_cache
 rootdir: /Users/ruoqibai/Desktop/Career/KubernetesGPU/worker
 configfile: pyproject.toml
 testpaths: tests
-collecting ... collected 13 items
+collecting ... collected 15 items
 
-tests/test_costmodel.py::test_matches_go_defaults PASSED                 [  7%]
-tests/test_costmodel.py::test_env_overrides PASSED                       [ 15%]
-tests/test_store.py::test_claim_order_and_attempt PASSED                 [ 23%]
-tests/test_store.py::test_fencing_after_reap PASSED                      [ 30%]
-tests/test_store.py::test_memory_filter_and_release PASSED               [ 38%]
-tests/test_store.py::test_heartbeat_upsert PASSED                        [ 46%]
-tests/test_worker.py::test_worker_claims_builds_completes PASSED         [ 53%]
-tests/test_worker.py::test_lease_lost_mid_build_abandons_without_completing PASSED [ 61%]
-tests/test_worker.py::test_sigterm_releases_long_build_and_finishes_short_one PASSED [ 69%]
-tests/test_worker.py::test_two_workers_never_share_a_build PASSED        [ 76%]
-tests/test_worker.py::test_registers_before_first_claim PASSED           [ 84%]
-tests/test_worker.py::test_build_error_marks_failed_with_reason_and_worker_continues PASSED [ 92%]
-tests/test_worker.py::test_bad_config_is_refused_before_connecting PASSED [100%]
+tests/test_costmodel.py::test_matches_go_defaults PASSED                 [  6%]
+tests/test_costmodel.py::test_env_overrides PASSED                       [ 13%]
+tests/test_store.py::test_claim_order_and_attempt PASSED                 [ 20%]
+tests/test_store.py::test_fencing_after_reap PASSED                      [ 26%]
+tests/test_store.py::test_memory_filter_and_release PASSED               [ 33%]
+tests/test_store.py::test_heartbeat_upsert PASSED                        [ 40%]
+tests/test_worker.py::test_worker_claims_builds_completes PASSED         [ 46%]
+tests/test_worker.py::test_lease_lost_mid_build_abandons_without_completing PASSED [ 53%]
+tests/test_worker.py::test_sigterm_releases_long_build_and_finishes_short_one PASSED [ 60%]
+tests/test_worker.py::test_two_workers_never_share_a_build PASSED        [ 66%]
+tests/test_worker.py::test_registers_before_first_claim PASSED           [ 73%]
+tests/test_worker.py::test_build_error_marks_failed_with_reason_and_worker_continues PASSED [ 80%]
+tests/test_worker.py::test_bad_config_is_refused_before_connecting PASSED [ 86%]
+tests/test_worker.py::test_survives_lost_database_connections_mid_build PASSED [ 93%]
+tests/test_worker.py::test_renew_outage_past_lease_deadline_assumes_lost PASSED [100%]
 
 ==================================== PASSES ====================================
 ___________________________ test_matches_go_defaults ___________________________
@@ -83,15 +85,16 @@ the scheduler's reaper decides the lease expired, and another worker claims atte
   [db] build 1:5: {'state': 'leased', 'attempt': 2, 'lease_owner': 'gpu-other', 'placement': 'gpu', 'lease_left_s': 30}
 worker's renew was rejected; it cancelled its build and left the row to gpu-other
 ------------------------------ Captured log call -------------------------------
-WARNING  kgpu.worker:worker.py:198 renew rejected: lease lost, cancelling build
-WARNING  kgpu.worker:worker.py:180 lost ownership
+WARNING  kgpu.worker:worker.py:263 renew rejected: lease lost, cancelling build
+WARNING  kgpu.worker:worker.py:228 lost ownership
 ___________ test_sigterm_releases_long_build_and_finishes_short_one ____________
 ----------------------------- Captured stdout call -----------------------------
   [db] build 1:6: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] build 1:6: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-term', 'placement': 'gpu', 'lease_left_s': 2}
 SIGTERM arrives with ~0.8 s of build left and a 0.2 s finish budget
   [db] build 1:6: {'state': 'queued', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-the build went back to the queue immediately (no waiting for the reaper), attempt unchanged
+the build went back to the queue immediately (no waiting for the reaper), attempt unchanged; counted as released, not lost
+the worker deregistered itself on the clean exit: pool state no longer counts it
   [db] build 2:6: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] build 2:6: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-term2', 'placement': 'gpu', 'lease_left_s': 2}
 SIGTERM arrives with the short build mid-flight and a generous budget
@@ -104,7 +107,7 @@ ______________________ test_registers_before_first_claim _______________________
 ----------------------------- Captured stdout call -----------------------------
   [db] build 1:8: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] build 1:8: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-first', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] registered_at=05:38:29.368874 claim started_at=05:38:29.370304
+  [db] registered_at=07:11:57.291080 claim started_at=07:11:57.292715
 ________ test_build_error_marks_failed_with_reason_and_worker_continues ________
 ----------------------------- Captured stdout call -----------------------------
   [db] build 1:9: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
@@ -115,16 +118,14 @@ ________ test_build_error_marks_failed_with_reason_and_worker_continues ________
   [db] build 1:9: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] build 2:9: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
   [db] build 1:9: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
-  [db] build 2:9: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-fail', 'placement': 'gpu', 'lease_left_s': 2}
-  [db] build 1:9: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] build 2:9: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   [db] 1:9: failed, reason='RuntimeError: injected failure for 1:9 (FAKE_FAIL_BUILD_IDS)'
   [db] build 1:9: {'state': 'failed', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
   the worker kept going and completed 2:9; the process did not crash
 ------------------------------ Captured log call -------------------------------
-ERROR    kgpu.worker:worker.py:134 build failed
+ERROR    kgpu.worker:worker.py:156 build failed
 Traceback (most recent call last):
-  File "/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/worker.py", line 129, in _work
+  File "/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/worker.py", line 151, in _work
     artifact = self.builder.build(job, progress, cur.cancel)
   File "/Users/ruoqibai/Desktop/Career/KubernetesGPU/worker/kgpu_worker/builder.py", line 78, in build
     raise RuntimeError(f"injected failure for {job.build_id} (FAKE_FAIL_BUILD_IDS)")
@@ -136,6 +137,169 @@ _________________ test_bad_config_is_refused_before_connecting _________________
   {'FAKE_TIME_SCALE': '-1'} -> ConfigError(FAKE_TIME_SCALE must be positive)
   {'COST_A': 'fast'} -> ConfigError(COST_* value is not a number (could not convert string to float: 'fast'))
   {'LOG_FORMAT': 'yaml'} -> ConfigError(LOG_FORMAT must be json or text)
+______________ test_survives_lost_database_connections_mid_build _______________
+----------------------------- Captured stdout call -----------------------------
+  [db] build 1:10: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+worker claimed and is building; now every one of its connections is killed server-side
+  terminated 3 backend connections (main, renewer, heartbeat)
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 2}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 1:10: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
+  [db] build 1:10: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
+  [db] build 2:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 2:10: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-outage', 'placement': 'gpu', 'lease_left_s': 3}
+  [db] build 2:10: {'state': 'done', 'attempt': 1, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
+reconnected on every thread, renewed in time, completed attempt 1, then claimed and completed the next build
+------------------------------ Captured log call -------------------------------
+WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
+WARNING  kgpu.worker:worker.py:279 postgres unavailable during heartbeat, reconnecting
+WARNING  kgpu.worker:worker.py:220 postgres unavailable during complete, reconnecting
+______________ test_renew_outage_past_lease_deadline_assumes_lost ______________
+----------------------------- Captured stdout call -----------------------------
+  [db] build 1:11: {'state': 'queued', 'attempt': 0, 'lease_owner': None, 'placement': 'gpu', 'lease_left_s': None}
+  [db] build 1:11: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-blackout', 'placement': 'gpu', 'lease_left_s': 1}
+renews failed for longer than the lease: the worker assumed the lease lost and cancelled the build
+  [db] build 1:11: {'state': 'leased', 'attempt': 1, 'lease_owner': 'gpu-blackout', 'placement': 'gpu', 'lease_left_s': 0}
+------------------------------ Captured log call -------------------------------
+WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
+WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
+WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
+WARNING  kgpu.worker:worker.py:253 postgres unavailable during renew, reconnecting
+WARNING  kgpu.worker:worker.py:248 renew failing past the lease deadline: assuming the lease is lost, cancelling build
+WARNING  kgpu.worker:worker.py:228 lost ownership
 =========================== short test summary info ============================
 PASSED tests/test_costmodel.py::test_matches_go_defaults
 PASSED tests/test_costmodel.py::test_env_overrides
@@ -150,13 +314,15 @@ PASSED tests/test_worker.py::test_two_workers_never_share_a_build
 PASSED tests/test_worker.py::test_registers_before_first_claim
 PASSED tests/test_worker.py::test_build_error_marks_failed_with_reason_and_worker_continues
 PASSED tests/test_worker.py::test_bad_config_is_refused_before_connecting
-============================== 13 passed in 3.10s ==============================
+PASSED tests/test_worker.py::test_survives_lost_database_connections_mid_build
+PASSED tests/test_worker.py::test_renew_outage_past_lease_deadline_assumes_lost
+============================== 15 passed in 7.75s ==============================
 
-== Docker events for container kgpu-test-pg-52657
-  22:38:26  create
-  22:38:26  start
-  22:38:30  kill
-  22:38:31  die
-  22:38:31  destroy
+== Docker events for container kgpu-test-pg-58985
+  00:11:54  create
+  00:11:54  start
+  00:12:03  kill
+  00:12:03  die
+  00:12:03  destroy
 
 == Result: PASS
