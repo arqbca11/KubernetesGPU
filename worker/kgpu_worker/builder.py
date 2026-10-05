@@ -56,12 +56,14 @@ class FakeBuilder:
 
     name = "fake"
 
-    def __init__(self, model: Model, time_scale: float = 1.0, slice_s: float = 0.1) -> None:
+    def __init__(self, model: Model, time_scale: float = 1.0, slice_s: float = 0.1,
+                 fail_build_ids: frozenset[str] = frozenset()) -> None:
         if time_scale <= 0:
             raise ValueError("time_scale must be positive")
         self.model = model
         self.time_scale = time_scale
         self.slice_s = slice_s
+        self.fail_build_ids = fail_build_ids   # these fail at 50%, to exercise the fail path
 
     def estimate_s(self, job: Job) -> float:
         return self.model.gpu_total_s(job.n_vectors, job.dim) / self.time_scale
@@ -71,6 +73,9 @@ class FakeBuilder:
         start = time.monotonic()
         while True:
             elapsed = time.monotonic() - start
+            # Injected failure first, so it fires even for builds shorter than one slice.
+            if job.build_id in self.fail_build_ids and elapsed >= total / 2:
+                raise RuntimeError(f"injected failure for {job.build_id} (FAKE_FAIL_BUILD_IDS)")
             if elapsed >= total:
                 break
             if cancel.is_set():
@@ -87,7 +92,7 @@ class FakeBuilder:
         )
 
 
-def by_name(name: str, model: Model, time_scale: float) -> Builder:
+def by_name(name: str, model: Model, time_scale: float, fail_build_ids: frozenset[str] = frozenset()) -> Builder:
     if name in ("", "fake"):
-        return FakeBuilder(model, time_scale=time_scale)
+        return FakeBuilder(model, time_scale=time_scale, fail_build_ids=fail_build_ids)
     raise ValueError(f"unknown builder {name!r}")

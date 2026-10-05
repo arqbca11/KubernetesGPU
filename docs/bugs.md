@@ -6,6 +6,22 @@ Entries are added when a bug changes how we think about the system, is subtle en
 
 ---
 
+## 5. A builder exception crashed the worker with the lease held: a poison-pill build
+
+**Found:** 2026-10-04, by the cross-check agent running the worker as a black-box process. Fixed the same day.
+
+**Symptom.** With `COST_BANDWIDTH=0`, a documented configuration override, the worker claimed a build and then the whole process died with exit status 1 and a `ZeroDivisionError` traceback. No `failed` or `released` line was logged. The row stayed `state=leased, attempt=1, lease_owner=gpu-err`.
+
+**Why it is worse than one crash.** The reaper would return the lease to the queue after it expired. A restarted worker, or any other worker with the same configuration, would claim the same build and crash the same way. Each cycle costs a lease length and a worker restart, and nothing ever marks the build failed. The build is a poison pill circulating through the pool forever, and under Kubernetes the symptom would be a worker Deployment in a crash loop with no obvious cause in the builds table.
+
+**Cause.** The exception came from `estimate_s`, which the loop called to write the `claimed` log line, outside the `try` that guarded `build()`. The guard covered the step the implementer thought of as "the build" rather than everything that happens while the lease is held.
+
+**Fix.** Two layers. Configuration is validated before the worker connects, so a value that would make arithmetic fail is refused with exit status 2 and one line naming the variable (decision 39). And the `try` now begins the instant the claim returns: any exception that is not a cancellation ends in the guarded `fail` with `TypeName: message` as the reason, the worker logs it, and the loop continues (decision 41). If even `fail` cannot be written, the worker says so and leaves the lease to the reaper.
+
+**Lesson.** In a lease-based worker, the invariant is not "the build is guarded" but "while I hold a lease, no code path may exit without resolving it." The guard belongs at the claim, not at the step you happen to call the build. And a process that can crash on a configured value should refuse the configuration at startup, before it can touch shared state.
+
+---
+
 ## 4. Lock-then-count race: a per-round cap that held for sequential submits and failed completely under concurrency
 
 **Found:** 2026-10-02, by the independent cross-check agent's concurrency test. Fixed in `c3e7178`.

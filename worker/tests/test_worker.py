@@ -16,14 +16,15 @@ from kgpu_worker.worker import Worker
 
 
 def make_worker(dsn: str, worker_id: str, *, time_scale: float = 50.0, lease_s: float = 2.0,
-                renew_s: float = 0.2, budget_s: float = 5.0) -> Worker:
+                renew_s: float = 0.2, budget_s: float = 5.0, fail_ids: frozenset[str] = frozenset()) -> Worker:
     cfg = Config(
         database_url=dsn, worker_id=worker_id, mem_bytes=8 << 30, lease_s=lease_s,
         renew_interval_s=renew_s, heartbeat_interval_s=0.5, poll_interval_s=0.05,
         builder="fake", fake_time_scale=time_scale, shutdown_finish_budget_s=budget_s,
-        log_format="text", model=Model(),
+        fake_fail_build_ids=fail_ids, log_format="text", model=Model(),
     )
-    return Worker(cfg, FakeBuilder(cfg.model, time_scale=time_scale))
+    cfg.validate()
+    return Worker(cfg, FakeBuilder(cfg.model, time_scale=time_scale, fail_build_ids=fail_ids))
 
 
 def run_in_thread(w: Worker) -> threading.Thread:
@@ -126,3 +127,52 @@ def test_two_workers_never_share_a_build(db, dsn):
     t1.join(5); t2.join(5)
     print(f"12 builds, 2 workers: gpu-a did {w1.builds_done}, gpu-b did {w2.builds_done}, every attempt is 1")
     assert w1.builds_done + w2.builds_done == 12 and w1.builds_lost == 0 and w2.builds_lost == 0
+
+
+def test_registers_before_first_claim(db, dsn):
+    """A worker must be in `workers` before it can hold a lease, so pool state
+    never misses a busy worker (cross-check finding)."""
+    r = new_round(db)
+    bid = new_build(db, r, 1, n=2_000_000)
+    w = make_worker(dsn, "gpu-first")
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, bid)["state"] == "leased", 5, "claim")
+    reg, started = db.execute(
+        """SELECT w.registered_at, b.started_at FROM workers w, builds b
+           WHERE w.worker_id = 'gpu-first' AND b.build_id = %s""", (bid,)).fetchone()
+    print(f"  [db] registered_at={reg.time()} claim started_at={started.time()}")
+    assert reg <= started
+    w.shutdown("test over"); t.join(5)
+
+
+def test_build_error_marks_failed_with_reason_and_worker_continues(db, dsn):
+    r = new_round(db)
+    bad = new_build(db, r, 1, n=20_000)
+    good = new_build(db, r, 2, n=20_000)
+    w = make_worker(dsn, "gpu-fail", fail_ids=frozenset({bad}))
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, bad)["state"] == "failed" and row(db, good)["state"] == "done", 10, "failed + done")
+    reason = db.execute("SELECT fail_reason FROM builds WHERE build_id = %s", (bad,)).fetchone()[0]
+    print(f"  [db] {bad}: failed, reason={reason!r}")
+    assert "injected failure" in reason and "RuntimeError" in reason
+    assert row(db, bad)["lease_owner"] is None
+    print(f"  the worker kept going and completed {good}; the process did not crash")
+    w.shutdown("test over"); t.join(5)
+    assert w.builds_done == 1 and w.builds_lost == 0
+
+
+def test_bad_config_is_refused_before_connecting():
+    import pytest
+    from kgpu_worker.config import ConfigError
+    base = {"DATABASE_URL": "postgres://nowhere/x"}
+    for env, msg in [
+        ({"COST_BANDWIDTH": "0"}, "COST_BANDWIDTH"),
+        ({"LEASE_SECONDS": "5", "RENEW_INTERVAL_SECONDS": "5"}, "RENEW_INTERVAL_SECONDS must be less than"),
+        ({"FAKE_TIME_SCALE": "-1"}, "FAKE_TIME_SCALE"),
+        ({"COST_A": "fast"}, "not a number"),
+        ({"LOG_FORMAT": "yaml"}, "LOG_FORMAT"),
+    ]:
+        with pytest.raises(ConfigError) as e:
+            Config.from_env(base | env)
+        print(f"  {env} -> ConfigError({e.value})")
+        assert msg in str(e.value)

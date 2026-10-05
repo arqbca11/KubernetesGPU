@@ -220,6 +220,9 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 36 | **Lease lost means cancel.** The renewer's rejected renew sets `lost` and `cancel`; the fake builder checks `cancel` every 100 ms and raises; the main loop then neither completes nor releases, it only logs `lost ownership` | Keep building and let `complete` fail at the end | Stops wasting the GPU the moment ownership is gone, and makes the SIGSTOP test observable in the worker's own log, not only in Postgres. |
 | 37 | **SIGTERM: stop claiming; finish the current build if its remaining time (from reported progress) is within `SHUTDOWN_FINISH_BUDGET_SECONDS`, else cancel and `release` it** | Always finish; always release | A nearly done build is worth the few seconds. A long one is handed back now so another worker starts it before the lease would have expired. The budget is config so Phase 2 can tie it to `terminationGracePeriodSeconds`. |
 | 38 | **`FAKE_TIME_SCALE` divides every fake build time** | Separate tiny cost constants for tests | Tests and demos run at 10x to 50x against the same cost model the scheduler uses, so estimates and sleeps stay consistent; `estimate_s` is scaled the same way, so the shutdown budget decision stays right. |
+| 39 | **The worker validates every configuration value before connecting and exits with status 2 and one line naming the variable.** Includes `RENEW_INTERVAL_SECONDS < LEASE_SECONDS` and positive `COST_*` values | Fail at first use | A worker must never claim a build it cannot handle. `COST_BANDWIDTH=0` once got as far as a claim and then crashed with the lease held (cross-check, bug log 5). |
+| 40 | **`FAKE_FAIL_BUILD_IDS`: the fake builder fails the listed builds at 50%** | No way to fail a fake build | The `fail` path, and later the Phase 4 question of a failed build and a waiting `needs_index` query, need a documented trigger at the process level. |
+| 41 | **After the claim, every exception that is not a cancellation ends in `fail` with `TypeName: message` as the reason, and the worker keeps claiming.** This covers the builder, the estimate, and the worker's own code. If even `fail` cannot be written, the worker logs it and leaves the lease to the reaper | Let the process crash | A crash leaves the row `leased`; the reaper requeues it, the next worker claims it and crashes too: a poison pill looping through the pool. Bug log 5. |
 
 ## Implementation notes
 
@@ -318,13 +321,39 @@ Worker configuration:
 | `POLL_INTERVAL_SECONDS` | 0.5 | Wait when the queue is empty |
 | `BUILDER` | `fake` | Builder implementation |
 | `FAKE_TIME_SCALE` | 1 | Divide fake build times (decision 38) |
-| `SHUTDOWN_FINISH_BUDGET_SECONDS` | 5 | Decision 37 |
+| `SHUTDOWN_FINISH_BUDGET_SECONDS` | 5 | Decision 37; compared with remaining time in scaled seconds (after `FAKE_TIME_SCALE`) |
+| `FAKE_FAIL_BUILD_IDS` | none | Comma-separated build ids the fake builder fails at 50% (decision 40) |
 | `LOG_FORMAT` | `json` | or `text` |
 | `COST_*` | | Same overrides as the scheduler |
 
-Behaviour the worker promises, in the order the loop does it: heartbeat before the first claim and every interval after; claim with its own `WORKER_ID` and `WORKER_MEM_BYTES`; renew every interval for exactly the claimed `attempt`; on a rejected renew, cancel the build and write nothing more to that row; on a build error, `fail` with the exception text as the reason; on success, `complete`; on SIGTERM, decision 37; exit code 0 after SIGTERM.
+Behaviour the worker promises, in the order the loop does it: validate config (decision 39); connect; a synchronous heartbeat, so the worker is in `workers` before it can hold a lease, then heartbeats every interval; claim with its own `WORKER_ID` and `WORKER_MEM_BYTES`; renew every interval for exactly the claimed `attempt`; on a rejected renew, cancel the build and write nothing more to that row, then keep claiming; on any exception after the claim, `fail` with `TypeName: message` as the reason and keep claiming (decision 41); on success, `complete`; on SIGTERM, decision 37, whether the signal arrives mid-build, between the claim and the build, or while idle (then exit within one poll interval); exit code 0 after SIGTERM, promptly after a release, after the build when finishing it. Logs go to stdout; a crash traceback, which should never happen after decisions 39 and 41, would go to stderr.
+
+Log vocabulary (the `msg` field; tests may match on these):
+
+| `msg` | When |
+| --- | --- |
+| `worker starting`, `registered`, `worker stopped` | Lifecycle; `worker stopped` carries `builds_done` and `builds_lost` |
+| `claimed` | After a successful claim; carries `estimate_s` |
+| `renew rejected: lease lost, cancelling build` | Renewer saw zero rows (WARN) |
+| `lost ownership` | Main thread gave up on the build; `why` says which write was rejected (WARN) |
+| `completed`, `marked failed` | The guarded write succeeded; `marked failed` carries `reason` |
+| `build failed` | The exception, with traceback (ERROR) |
+| `shutdown requested` | SIGTERM/SIGINT; `why` |
+| `finishing current build before exit`, `cancelling current build to release it` | Decision 37; both carry `remaining_s` and `budget_s` |
+| `released back to queue` | The guarded release succeeded |
 
 **Smoke test with real processes (2026-10-04).** Postgres in a container, the Go scheduler binary with a 1 s reap interval, two Python worker processes with a 3 s lease, 1 s renew, 10x time scale. A 2M-vector build (65 s modeled, 6.5 s scaled) was submitted. Worker A claimed it (attempt 1) and was `kill -9`'d after 2 s. The scheduler logged `lease expired, build back to queued … attempt=1 lease_owner=gpu-A`; worker B claimed attempt 2 and completed it; the final row was `done`, attempt 2, 9.8 s after the kill (3 s lease plus 6.5 s build). Then a second build: worker B claimed it, received SIGTERM 1 s in with 5.4 s remaining against a 5 s budget, cancelled at 19%, released it (`queued`, attempt 1, no owner), and exited 0. This is the phase's done-when condition, shown by hand at the process level; step 4 repeats it under Compose and step 6 under the shard simulator.
+
+### Cross-check of step 3, the worker (2026-10-04)
+
+A fresh agent wrote 11 Go tests that run the real worker process (`python -m kgpu_worker`) as a subprocess, configure it only through its documented environment variables, and observe Postgres and the worker's log. 9 passed, 2 failed. Among the passes: `kill -9` mid-build with a second worker completing attempt 2 exactly once; SIGSTOP past the lease, SIGCONT, and the row byte-for-byte unchanged a full build time later; a reclaimed build cancelled within one renew interval; both SIGTERM branches.
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** The first heartbeat raced the first claim: the claim's `started_at` was 3 to 6 ms before the worker's `registered_at`, so pool state could miss a worker that was already busy. | The first heartbeat is synchronous, before the loop starts. Python test `registers_before_first_claim`. |
+| **Bug, serious.** `COST_BANDWIDTH=0`, a documented override, made the builder's arithmetic raise after the claim; the process died with exit 1 and the row stayed `leased`. The reaper would requeue it and the next worker would crash the same way: a poison pill. | Decisions 39 and 41. Bug log 5. The agent's test became two: bad config is refused at startup with exit 2 and no claim; a build error via `FAKE_FAIL_BUILD_IDS` ends in `failed` with the reason and the worker lives on. |
+| No way to fail a fake build. | Decision 40, `FAKE_FAIL_BUILD_IDS`. |
+| After a lost lease, does the worker keep claiming? Budget units? SIGTERM while idle or during a claim? Which stream? Log message names? `RENEW >= LEASE`? | All stated in the behaviour paragraph, the config table, the log vocabulary table, and decision 39. |
 
 ### Cross-check of steps 1 and 2, second run (2026-10-02, against the revised spec)
 

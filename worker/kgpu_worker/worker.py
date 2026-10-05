@@ -66,13 +66,17 @@ class Worker:
         self.stopping.set()
         with self._lock:
             cur = self.current
-        if cur is None:
-            return
+        if cur is not None:
+            self._apply_shutdown_policy(cur)
+
+    def _apply_shutdown_policy(self, cur: Current) -> None:
+        """Decision 37. remaining is in scaled seconds, the same units as the budget."""
         remaining = self.builder.estimate_s(cur.job) * (1.0 - cur.progress)
+        tags = self._tags(cur.job) | {"remaining_s": round(remaining, 2), "budget_s": self.cfg.shutdown_finish_budget_s}
         if remaining <= self.cfg.shutdown_finish_budget_s:
-            log.info("finishing current build before exit", extra=self._tags(cur.job) | {"remaining_s": round(remaining, 2)})
+            log.info("finishing current build before exit", extra=tags)
         else:
-            log.info("cancelling current build to release it", extra=self._tags(cur.job) | {"remaining_s": round(remaining, 2)})
+            log.info("cancelling current build to release it", extra=tags)
             cur.cancel.set()
 
     def run(self) -> None:
@@ -80,6 +84,10 @@ class Worker:
         log.info("worker starting", extra={"worker_id": self.cfg.worker_id, "mem_bytes": self.cfg.mem_bytes,
                                           "builder": self.builder.name, "lease_s": self.cfg.lease_s,
                                           "renew_interval_s": self.cfg.renew_interval_s})
+        # The first heartbeat is synchronous: a worker must be in `workers`
+        # before it can hold a lease, so pool state never misses a busy worker.
+        self.store.heartbeat(self.cfg.worker_id, self.cfg.mem_bytes)
+        log.info("registered", extra={"worker_id": self.cfg.worker_id})
         hb = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
         hb.start()
         try:
@@ -103,23 +111,35 @@ class Worker:
         with self._lock:
             self.current = cur
         tags = self._tags(job)
-        log.info("claimed", extra=tags | {"n_vectors": job.n_vectors, "dim": job.dim,
-                                          "estimate_s": round(self.builder.estimate_s(job), 2)})
         renewer = threading.Thread(target=self._renew_loop, args=(cur,), name=f"renew-{job.build_id}", daemon=True)
         renewer.start()
 
         def progress(p: float) -> None:
             cur.progress = p
 
+        # From here on the lease is ours, so every exception that is not a
+        # cancellation ends in `fail` with the reason. A crash would leave
+        # the row leased and the build would poison the next worker too.
         try:
+            log.info("claimed", extra=tags | {"n_vectors": job.n_vectors, "dim": job.dim,
+                                              "estimate_s": round(self.builder.estimate_s(job), 2)})
+            if self.stopping.is_set():
+                # SIGTERM landed between the claim and here: same decision as mid-build.
+                self._apply_shutdown_policy(cur)
             artifact = self.builder.build(job, progress, cur.cancel)
         except Cancelled as e:
             self._after_cancel(cur, str(e))
             return
-        except Exception as e:  # noqa: BLE001  the build itself failed
+        except Exception as e:  # noqa: BLE001  the build (or anything after the claim) failed
             log.exception("build failed", extra=tags)
-            if self.store.fail(job.build_id, job.attempt, f"{type(e).__name__}: {e}"[:500]):
-                log.info("marked failed", extra=tags)
+            reason = f"{type(e).__name__}: {e}"[:500]
+            try:
+                ok = self.store.fail(job.build_id, job.attempt, reason)
+            except Exception:  # noqa: BLE001  database gone too: the reaper will recover the lease
+                log.exception("could not mark failed; leaving it to the reaper", extra=tags)
+                return
+            if ok:
+                log.info("marked failed", extra=tags | {"reason": reason})
             else:
                 self._lost(tags, "fail rejected: stale attempt")
             return
