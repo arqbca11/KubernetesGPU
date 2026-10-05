@@ -8,7 +8,7 @@ Entries are added when a bug changes how we think about the system, is subtle en
 
 ## 5. A builder exception crashed the worker with the lease held: a poison-pill build
 
-**Found:** 2026-10-04, by the cross-check agent running the worker as a black-box process. Fixed the same day.
+**Found:** 2026-10-04, by the cross-check agent running the worker as a black-box process. Fixed the same day in [`9f206d0`](https://github.com/arqbca11/KubernetesGPU/commit/9f206d0); the fix is the `_work` hunk of `worker/kgpu_worker/worker.py` plus `validate` in `config.py` and the exit-2 handling in `__main__.py`. (Bundled with the rest of that cross-check round; later bug fixes get their own commit.)
 
 **Symptom.** With `COST_BANDWIDTH=0`, a documented configuration override, the worker claimed a build and then the whole process died with exit status 1 and a `ZeroDivisionError` traceback. No `failed` or `released` line was logged. The row stayed `state=leased, attempt=1, lease_owner=gpu-err`.
 
@@ -24,7 +24,7 @@ Entries are added when a bug changes how we think about the system, is subtle en
 
 ## 4. Lock-then-count race: a per-round cap that held for sequential submits and failed completely under concurrency
 
-**Found:** 2026-10-02, by the independent cross-check agent's concurrency test. Fixed in `c3e7178`.
+**Found:** 2026-10-02, by the independent cross-check agent's concurrency test. Fixed in [`c3e7178`](https://github.com/arqbca11/KubernetesGPU/commit/c3e7178), the `SubmitBuild` hunk of `scheduler/store/store.go`.
 
 **Symptom.** Twelve concurrent `POST /builds` into a round created with `n_shards = 3` all returned 201. Postgres held twelve builds in the round. The same cap worked perfectly when submits arrived one at a time, which is why the implementer's tests, all sequential, passed.
 
@@ -76,7 +76,7 @@ Both halves are necessary. Lock without a fresh count is this bug. A fresh count
 
 ## 3. A `stream_done` report from a shard with no build could complete a round
 
-**Found:** 2026-10-02, by the cross-check agent. Fixed in `c3e7178`.
+**Found:** 2026-10-02, by the cross-check agent. Fixed in [`c3e7178`](https://github.com/arqbca11/KubernetesGPU/commit/c3e7178) and [`412c189`](https://github.com/arqbca11/KubernetesGPU/commit/412c189) (the foreign keys).
 
 **Symptom.** Round of two shards. Both builds finished. Shard 0 reported its stream done, shard 1 was still streaming. A status row written for a shard 99 that had never submitted, with `stream_done = true`, made `FinishCompleteRounds` stamp the round finished.
 
@@ -90,7 +90,7 @@ Both halves are necessary. Lock without a fresh count is this bug. A fresh count
 
 ## 2. Test packages sharing one database truncated each other mid-test
 
-**Found:** 2026-10-02, while triaging the first cross-check run. Fixed in `5fdc4eb`.
+**Found:** 2026-10-02, while triaging the first cross-check run. Fixed in [`5fdc4eb`](https://github.com/arqbca11/KubernetesGPU/commit/5fdc4eb), `scripts/test-db.sh`.
 
 **Symptom.** A test created a round, got `{"round_id": 19}` back, submitted a build into round 19, and received 404 "no such round." Another package's test reported a build it had just inserted as missing.
 
@@ -104,7 +104,7 @@ Both halves are necessary. Lock without a fresh count is this bug. A fresh count
 
 ## 1. Duplicate submit mixed the stored row with the repeat's request body
 
-**Found:** 2026-10-02, by the cross-check agent's first run. Fixed in `5fdc4eb`.
+**Found:** 2026-10-02, by the cross-check agent's first run. Fixed in [`5fdc4eb`](https://github.com/arqbca11/KubernetesGPU/commit/5fdc4eb), `scheduler/api/api.go`.
 
 **Symptom.** A shard retried `POST /builds` with a body that differed from the original. The response said `created: false` and returned the stored placement and memory, but the CPU and GPU time estimates were computed from the repeat's `n_vectors`. A shard retrying a local build would have slept for the wrong time.
 
