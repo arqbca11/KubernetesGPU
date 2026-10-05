@@ -215,6 +215,11 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 31 | **In-flight placement changes are two more guarded transitions.** Preempt: `running` → `queued` with `placement` flipped to `gpu`, `started_at` cleared, `priority` set, guarded by `placement = 'local' AND state = 'running'`. Renege: `queued` → `running` with `placement` flipped to `local` and `started_at` set to now, guarded by `placement = 'gpu' AND state = 'queued'`. A `leased` build is never moved. `attempt` and `enqueued_at` are untouched by both: the first claim bumps `attempt`, and `enqueued_at` keeps the submit time for the timeline (decision 24), so a preempted build sorts among equal priorities by its original submit time | Cancel and resubmit under a new id | Same row, same idempotency key, same timeline. The guards make a change race-free against a concurrent claim or completion, and a shard that didn't notice a preemption is refused at `done` by the existing guard. Phase 1 ships the transitions and tests them; Phase 3 ships the policy that uses them. |
 | 32 | **Queue semantics on the shard:** one CPU, runs the local build if any, else the oldest ready query; a query is ready if it doesn't need the index or the index is built; queries that aren't ready wait without blocking others | Strict FIFO where a `needs_index` query at the head blocks everything behind it | Sessions in a real database are independent; a blocked one doesn't block the rest. This also makes "freeing the CPU" worth something even when some queries need the index. |
 | 33 | **Only shards that submitted take part in a round.** A report or an arrival from a shard with no build in the round is refused (`ErrNoBuild`, 404 over HTTP); `FinishCompleteRounds` counts `stream_done` only for shards that have a build; `stream_done` is sticky (a later report cannot withdraw it); an arrival after `stream_done` is refused (`ErrStreamDone`, 409) | Accept and ignore; or a foreign key from `shard_status` and `shard_jobs` to `builds` | Found by the cross-check: a `stream_done` row from a shard with no build could complete a round while a real shard was still streaming. Refusing at the store makes the rule hold for every caller, not only HTTP. Migration 0004 (owner's yes, 2026-10-03) goes further: `UNIQUE (round_id, shard_id)` on `builds` and foreign keys from `shard_status` and `shard_jobs` to it, so the rule is Postgres's, and the store maps SQLSTATE 23503 to `ErrNoBuild`. |
+| 34 | **Worker: one Python package, `worker/kgpu_worker`, with `store.py` (SQL), `builder.py` (the interface), `worker.py` (the loop), `config.py` (env), run as `python -m kgpu_worker`** | A single script | The build interface must be a seam from day one (invariant 9); Phase 4 adds `hnswlib.py`, Phase 5 `cuvs.py`, and nothing else moves. |
+| 35 | **Three threads, one connection each: main (claim, build, complete), renewer (per build), heartbeat.** All run with autocommit, one statement per call | asyncio; a shared connection | The build blocks for seconds to minutes, so the renewer must be a separate thread anyway. One connection per thread avoids sharing a psycopg connection across threads. Autocommit matches the Go store: every guarded update is its own transaction. |
+| 36 | **Lease lost means cancel.** The renewer's rejected renew sets `lost` and `cancel`; the fake builder checks `cancel` every 100 ms and raises; the main loop then neither completes nor releases, it only logs `lost ownership` | Keep building and let `complete` fail at the end | Stops wasting the GPU the moment ownership is gone, and makes the SIGSTOP test observable in the worker's own log, not only in Postgres. |
+| 37 | **SIGTERM: stop claiming; finish the current build if its remaining time (from reported progress) is within `SHUTDOWN_FINISH_BUDGET_SECONDS`, else cancel and `release` it** | Always finish; always release | A nearly done build is worth the few seconds. A long one is handed back now so another worker starts it before the lease would have expired. The budget is config so Phase 2 can tie it to `terminationGracePeriodSeconds`. |
+| 38 | **`FAKE_TIME_SCALE` divides every fake build time** | Separate tiny cost constants for tests | Tests and demos run at 10x to 50x against the same cost model the scheduler uses, so estimates and sleeps stay consistent; `estimate_s` is scaled the same way, so the shutdown budget decision stays right. |
 
 ## Implementation notes
 
@@ -284,6 +289,42 @@ Tests added: `costmodel` (range and monotonicity), `policy` (the four placement 
 | `scheduler/policy/` | `BuildSpec` has no job list. |
 
 Tests revised or added: store `RoundFinishesOnlyWhenEveryShardIsDone` (now walks arrivals, reports and the `stream_done` gate) and `PreemptAndRenegeTransitions` (decision 31, including that a leased build is never moved and a preempted shard's `done` is refused); api `EndToEndRoundOverHTTP` (arrivals, reports, the reply carrying the build's state, the round staying open until `stream_done`) and `ReportReflectsPreemption` (the shard learns of a preemption from its report reply). The old-spec cross-check tests were removed and the cross-check rerun against the revised spec; see below.
+
+### Step 3: Python worker (done 2026-10-04)
+
+| Path | What |
+| --- | --- |
+| `worker/pyproject.toml`, `worker/uv.lock` | Project and pinned lockfile. Runtime dependency: `psycopg[binary]`. Dev: `pytest`. |
+| `worker/kgpu_worker/store.py` | The worker's SQL: heartbeat, claim, renew, complete, fail, release. Each statement mirrors `scheduler/store/store.go` (decision 13); `claim` returns `round_id` too, so every log line can carry it. |
+| `worker/kgpu_worker/costmodel.py` | Cost model v0 mirror; `test_costmodel.py` pins the Go test's exact numbers. |
+| `worker/kgpu_worker/builder.py` | `Builder` protocol: `build(job, progress, cancel) -> Artifact`, `estimate_s(job)`. `FakeBuilder` sleeps for `gpu_total_s / FAKE_TIME_SCALE` in 100 ms slices, reporting progress and honouring `cancel`. |
+| `worker/kgpu_worker/worker.py` | The loop (decisions 35 to 37). |
+| `worker/kgpu_worker/config.py` | Environment variables, table below. |
+| `worker/kgpu_worker/logging_setup.py` | JSON lines (default) or text; every build line carries `build_id`, `attempt`, `round_id`. |
+| `worker/Dockerfile` | `python:3.12-slim`, `uv` copied from its image, two-layer `uv sync`, non-root, exec-form entrypoint so SIGTERM reaches Python. About 360 MB. |
+| `worker/tests/` | `conftest.py` applies `db/migrations/*.sql` the same way the Go runner does. `test_store.py`: claim order, the full fencing walk from the Python side, memory filter, release, heartbeat. `test_worker.py`: a worker completes builds; a worker whose lease is reaped and re-claimed mid-build abandons without completing; SIGTERM releases a long build and finishes a short one; two workers drain twelve builds with every attempt equal to 1. |
+| `scripts/test-db.sh` | Now runs Go then Python; `--go`, `--py`. |
+
+Worker configuration:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` | required | Postgres |
+| `WORKER_ID` | hostname | Appears in `workers` and `lease_owner` |
+| `WORKER_MEM_BYTES` | 8 GiB | Modeled capacity; the claim filters `mem_bytes <=` this |
+| `LEASE_SECONDS` | 30 | Lease length on claim and renew |
+| `RENEW_INTERVAL_SECONDS` | 10 | Renewer period |
+| `HEARTBEAT_INTERVAL_SECONDS` | 5 | Heartbeat period |
+| `POLL_INTERVAL_SECONDS` | 0.5 | Wait when the queue is empty |
+| `BUILDER` | `fake` | Builder implementation |
+| `FAKE_TIME_SCALE` | 1 | Divide fake build times (decision 38) |
+| `SHUTDOWN_FINISH_BUDGET_SECONDS` | 5 | Decision 37 |
+| `LOG_FORMAT` | `json` | or `text` |
+| `COST_*` | | Same overrides as the scheduler |
+
+Behaviour the worker promises, in the order the loop does it: heartbeat before the first claim and every interval after; claim with its own `WORKER_ID` and `WORKER_MEM_BYTES`; renew every interval for exactly the claimed `attempt`; on a rejected renew, cancel the build and write nothing more to that row; on a build error, `fail` with the exception text as the reason; on success, `complete`; on SIGTERM, decision 37; exit code 0 after SIGTERM.
+
+**Smoke test with real processes (2026-10-04).** Postgres in a container, the Go scheduler binary with a 1 s reap interval, two Python worker processes with a 3 s lease, 1 s renew, 10x time scale. A 2M-vector build (65 s modeled, 6.5 s scaled) was submitted. Worker A claimed it (attempt 1) and was `kill -9`'d after 2 s. The scheduler logged `lease expired, build back to queued … attempt=1 lease_owner=gpu-A`; worker B claimed attempt 2 and completed it; the final row was `done`, attempt 2, 9.8 s after the kill (3 s lease plus 6.5 s build). Then a second build: worker B claimed it, received SIGTERM 1 s in with 5.4 s remaining against a 5 s budget, cancelled at 19%, released it (`queued`, attempt 1, no owner), and exited 0. This is the phase's done-when condition, shown by hand at the process level; step 4 repeats it under Compose and step 6 under the shard simulator.
 
 ### Cross-check of steps 1 and 2, second run (2026-10-02, against the revised spec)
 

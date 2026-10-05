@@ -75,8 +75,12 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | --- | --- |
 | Check toolchain | `go version && python3.12 --version && uv --version && psql --version && docker compose version` |
 | Compile and vet Go | `go build ./... && go vet ./...` |
-| Go tests (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh` (default `-v ./...`; extra args replace that, e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`). Runs packages one at a time (`-p 1`) because they share the database. Writes a narrated log to `test-logs/latest.log` (tracked) and `test-logs/history/` (local). |
+| All tests, Go then Python (needs Docker; starts a throwaway Postgres) | `scripts/test-db.sh`. `--go` or `--py` for one side; explicit `go test` args (e.g. `scripts/test-db.sh -v -run Fencing ./scheduler/...`) run Go only. Go packages run one at a time (`-p 1`) because they share the database. Writes a narrated log to `test-logs/latest.log` (tracked) and `test-logs/history/` (local). |
 | Go unit tests only, no database | `go test ./...` (database tests skip themselves when `TEST_DATABASE_URL` is unset) |
+| Python environment | `cd worker && uv sync` (creates `.venv` from `uv.lock`; `uv lock` after changing `pyproject.toml`) |
+| Python unit tests only, no database | `cd worker && uv run pytest` (database tests skip without `TEST_DATABASE_URL`) |
+| Run the worker locally | `cd worker && DATABASE_URL=... LOG_FORMAT=text FAKE_TIME_SCALE=10 uv run python -m kgpu_worker` (env vars in `worker/kgpu_worker/config.py`) |
+| Build the worker image | `docker build -t kgpu-worker worker/` |
 
 | Run the scheduler locally | `DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/kgpu?sslmode=disable LOG_FORMAT=text go run ./scheduler/cmd/scheduler` (env vars documented at the top of `scheduler/cmd/scheduler/main.go`) |
 | Build the scheduler image | `docker build -f scheduler/Dockerfile -t kgpu-scheduler .` (context is the repo root) |

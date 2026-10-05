@@ -132,6 +132,7 @@ type BuildRow struct {
 // Claimed is what a worker gets back from a successful claim.
 type Claimed struct {
 	BuildID  string
+	RoundID  int64
 	Attempt  int32
 	NVectors int64
 	Dim      int32
@@ -280,9 +281,9 @@ func (s *Store) Claim(ctx context.Context, workerID string, memCap int64, lease 
 		  ORDER BY priority DESC, enqueued_at
 		  LIMIT 1
 		  FOR UPDATE SKIP LOCKED)
-		RETURNING build_id, attempt, n_vectors, dim, mem_bytes`,
+		RETURNING build_id, round_id, attempt, n_vectors, dim, mem_bytes`,
 		workerID, memCap, lease.Seconds()).
-		Scan(&c.BuildID, &c.Attempt, &c.NVectors, &c.Dim, &c.MemBytes)
+		Scan(&c.BuildID, &c.RoundID, &c.Attempt, &c.NVectors, &c.Dim, &c.MemBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Claimed{}, false, nil
 	}

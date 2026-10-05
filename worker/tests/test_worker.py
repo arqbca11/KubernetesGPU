@@ -1,0 +1,128 @@
+"""The worker loop against a real Postgres with the fake builder sped up.
+Each test runs a Worker in a thread, drives the database the way the
+scheduler, the reaper and a second worker would, and reads the outcome back.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+from conftest import new_build, new_round, row
+from kgpu_worker.builder import FakeBuilder
+from kgpu_worker.config import Config
+from kgpu_worker.costmodel import Model
+from kgpu_worker.worker import Worker
+
+
+def make_worker(dsn: str, worker_id: str, *, time_scale: float = 50.0, lease_s: float = 2.0,
+                renew_s: float = 0.2, budget_s: float = 5.0) -> Worker:
+    cfg = Config(
+        database_url=dsn, worker_id=worker_id, mem_bytes=8 << 30, lease_s=lease_s,
+        renew_interval_s=renew_s, heartbeat_interval_s=0.5, poll_interval_s=0.05,
+        builder="fake", fake_time_scale=time_scale, shutdown_finish_budget_s=budget_s,
+        log_format="text", model=Model(),
+    )
+    return Worker(cfg, FakeBuilder(cfg.model, time_scale=time_scale))
+
+
+def run_in_thread(w: Worker) -> threading.Thread:
+    t = threading.Thread(target=w.run, name=w.cfg.worker_id, daemon=True)
+    t.start()
+    return t
+
+
+def wait_for(pred, timeout: float, what: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_worker_claims_builds_completes(db, dsn):
+    r = new_round(db)
+    a, b = new_build(db, r, 1), new_build(db, r, 2)
+    print("two queued builds; one worker; fake builds take ~0.09 s each at 50x")
+    w = make_worker(dsn, "gpu-1")
+    t = run_in_thread(w)
+    wait_for(lambda: db.execute("SELECT count(*) FROM builds WHERE state = 'done'").fetchone()[0] == 2, 10, "both builds done")
+    for bid in (a, b):
+        d = row(db, bid)
+        assert d["state"] == "done" and d["attempt"] == 1
+    hb = db.execute("SELECT worker_id, mem_bytes FROM workers").fetchall()
+    print(f"  [db] workers: {hb}")
+    assert hb == [("gpu-1", 8 << 30)]
+    w.shutdown("test over")
+    t.join(5)
+    assert w.builds_done == 2 and w.builds_lost == 0
+    print("worker exited cleanly; builds_done=2 builds_lost=0")
+
+
+def test_lease_lost_mid_build_abandons_without_completing(db, dsn):
+    """A paused worker's lease is reaped and re-claimed; when it resumes, its
+    renew is rejected, it cancels the build and does NOT complete."""
+    r = new_round(db)
+    bid = new_build(db, r, 1, n=5_000_000)   # ~0.9 s at 50x: long enough to interfere with
+    w = make_worker(dsn, "gpu-slow", renew_s=0.1)
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, bid)["state"] == "leased", 5, "claim")
+    print("worker claimed (attempt 1) and is building")
+
+    print("the scheduler's reaper decides the lease expired, and another worker claims attempt 2")
+    db.execute("""UPDATE builds SET state = 'queued', lease_owner = NULL, lease_until = NULL, started_at = NULL
+                  WHERE build_id = %s""", (bid,))
+    db.execute("""UPDATE builds SET state = 'leased', attempt = attempt + 1, lease_owner = 'gpu-other',
+                  lease_until = now() + interval '30 seconds', started_at = now() WHERE build_id = %s""", (bid,))
+    row(db, bid)
+
+    wait_for(lambda: w.builds_lost == 1, 5, "worker to notice the lost lease")
+    d = row(db, bid)
+    assert d["state"] == "leased" and d["attempt"] == 2 and d["lease_owner"] == "gpu-other"
+    print("worker's renew was rejected; it cancelled its build and left the row to gpu-other")
+    w.shutdown("test over")
+    t.join(5)
+    assert w.builds_done == 0
+
+
+def test_sigterm_releases_long_build_and_finishes_short_one(db, dsn):
+    r = new_round(db)
+    long_ = new_build(db, r, 1, n=5_000_000)   # ~0.9 s at 50x
+    w = make_worker(dsn, "gpu-term", budget_s=0.2)
+    t = run_in_thread(w)
+    wait_for(lambda: row(db, long_)["state"] == "leased", 5, "claim of the long build")
+    print("SIGTERM arrives with ~0.8 s of build left and a 0.2 s finish budget")
+    w.shutdown("SIGTERM")
+    t.join(5)
+    d = row(db, long_)
+    assert d["state"] == "queued" and d["attempt"] == 1 and d["lease_owner"] is None
+    print("the build went back to the queue immediately (no waiting for the reaper), attempt unchanged")
+    # Park it so the next worker does not pick the long build up again.
+    db.execute("UPDATE builds SET state = 'done', finished_at = now() WHERE build_id = %s", (long_,))
+
+    short = new_build(db, r, 2, n=1_000)        # ~0.04 s at 50x
+    w2 = make_worker(dsn, "gpu-term2", budget_s=5.0, time_scale=5.0)   # ~0.4 s build, 5 s budget
+    t2 = run_in_thread(w2)
+    wait_for(lambda: row(db, short)["state"] == "leased", 5, "claim of the short build")
+    print("SIGTERM arrives with the short build mid-flight and a generous budget")
+    w2.shutdown("SIGTERM")
+    t2.join(10)
+    d = row(db, short)
+    assert d["state"] == "done"
+    print("the short build was finished before exit")
+
+
+def test_two_workers_never_share_a_build(db, dsn):
+    r = new_round(db)
+    ids = [new_build(db, r, i, n=20_000) for i in range(12)]
+    w1, w2 = make_worker(dsn, "gpu-a"), make_worker(dsn, "gpu-b")
+    t1, t2 = run_in_thread(w1), run_in_thread(w2)
+    wait_for(lambda: w1.builds_done + w2.builds_done == 12, 20, "both workers to count 12 completions")
+    assert db.execute("SELECT count(*) FROM builds WHERE state = 'done'").fetchone()[0] == 12
+    attempts = db.execute("SELECT attempt FROM builds WHERE round_id = %s", (r,)).fetchall()
+    assert all(a == (1,) for a in attempts)
+    w1.shutdown("done"); w2.shutdown("done")
+    t1.join(5); t2.join(5)
+    print(f"12 builds, 2 workers: gpu-a did {w1.builds_done}, gpu-b did {w2.builds_done}, every attempt is 1")
+    assert w1.builds_done + w2.builds_done == 12 and w1.builds_lost == 0 and w2.builds_lost == 0

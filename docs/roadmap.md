@@ -183,7 +183,7 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 - [x] Postgres schema and migrations, with an integration test of claim, renew, complete and reap against a throwaway Postgres container
 - [x] Scheduler API: start a round, submit a build (v0 policy: always GPU unless it doesn't fit in memory), record query arrivals and completions, accept shard load reports and answer with the build's current placement, read round status
-- [ ] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
+- [x] Worker loop: register and heartbeat, claim, renew on a background thread, sleep, complete
 - [x] Reaper in the scheduler
 - [ ] Shard simulator: one binary running N shards as goroutines. Each shard submits its build, generates its query stream, runs the local build and ready queries on its single CPU under the rules above, reports its load every poll interval, and obeys placement changes in the reply (abort a preempted local build; start a build moved to local)
 - [ ] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Only the default scenario needs to run in Phase 1.
