@@ -95,6 +95,22 @@ Pure functions; no database. The generator's modeling choices and their referenc
 | DDLOffsets | Staggered at 6 and 50 shards; every other preset. | Staggered offsets lie in [0, Spread] and span it, and the horizon outlasts the spread; all-at-once offsets are zero. |
 | PresetTable | All presets at 6 and 50 shards. | Prints each preset's parameters (documentation only). |
 
+## Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`
+
+These run the real `shardsim` binary against an in-process scheduler, a reaper loop and a fake GPU worker, and observe only through Postgres, the binary's stdout and its timeline JSON.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| ShardsimPrintWorkloadMatchesGenerate | `PRINT_WORKLOAD=1` run twice for four preset/seed/shard combinations, up to 50 shards, compared with `Generate` in the test process. | The binary replays exactly the seeded workload, deterministically across processes (invariant 10, decision 51). |
+| ShardsimGPURoundRecordsEveryQueryOnce | A default six-shard round at 20x against two fake GPU workers. | Every workload query is recorded once, in order, and finished; builds end gpu/done at attempt 1, each claimed once; one CPU per shard (no overlapping runs); the round is stamped (decisions 28, 30, 32, 53). |
+| ShardsimNeedsIndexWaitsForGPUBuild | The GPU is held back one second while queries pile up. | No `needs_index` query starts before its shard's build finished; independent queries are not blocked by them (decision 32). |
+| ShardsimLocalBuildOccupiesCPU | The only worker has one byte of memory, so every build goes local. | A local build holds the CPU for cpu_build divided by the time scale (2.194 s against 2.187 s expected) and no query starts before it is done; local builds stay at attempt 0 (decisions 7, 32, 55). |
+| ShardsimReportsCadenceAndStickyStreamDone | `shard_status` sampled every 20 ms during a round with a delayed GPU. | Reports come every `POLL_INTERVAL` and carry the backlog; `stream_done` comes after the last arrival and never flips back (decisions 29, 30, 33). |
+| ShardsimHonoursPreemption | A running 200k local build is preempted at 0.4 s of 4.4 s, then a fake worker claims it. | The shard aborts within 100 ms, independent queries start on the freed CPU 189 ms later, `needs_index` queries wait for the GPU, the build ends gpu/done at attempt 1 by the worker's guarded complete (decisions 31, 54). |
+| ShardsimSIGTERMStopsPromptly | SIGTERM mid-round at time scale 1. | The process exits within about 10 ms and records no further arrivals (decision 57). |
+| ShardsimBadScenarioExitsBeforeScheduler | An unknown `SCENARIO`. | Exit 2 within milliseconds, zero HTTP requests, no round created (decision 57). |
+| ShardsimTimelineJSONAgreesWithPostgres | Two bimodal rounds with mixed GPU and local placement and `TIMELINE_DIR` set. | The per-round JSON matches Postgres field for field (counts, placements, attempts, timestamps within 5 ms, exact duration); each query's kind and cluster id match the workload; rounds use seed, seed+1 (decision 56). |
+
 ## Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`
 
 Integration tests: the real scheduler API over HTTP, real Postgres, and an in-test fake worker that claims and completes GPU builds. Workloads are hand-built, so these do not depend on the generator.

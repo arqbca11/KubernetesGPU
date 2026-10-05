@@ -15,6 +15,7 @@ Narrated test output, kept so what was checked and what happened can be read wit
 | `phase1/step5-workload.log` | Step 5: the workload generator's 13 tests (written by an independent agent). |
 | `phase1/step5-shardsim.log` | Step 5: the shard simulator against the real API and Postgres (end-to-end round, local build blocking, preemption). |
 | `phase1/step5-compose-round.log` | Step 5: the first real six-shard round on the Compose stack, with the timeline. |
+| `phase1/step5-crosscheck-shardsim.log` | The cross-check agent's nine black-box tests of the `shardsim` binary. |
 
 Per-step logs are the state of the tests at the end of that step, including any fixes from the step's cross-check round, regenerated whenever the step's code changes. `history/` (local only, not committed) keeps every timestamped run.
 

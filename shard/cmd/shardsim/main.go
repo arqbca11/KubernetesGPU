@@ -49,6 +49,23 @@ func main() {
 		RoundTimeout: envDuration(log, "ROUND_TIMEOUT", 30*time.Minute),
 	}
 	timelineDir := os.Getenv("TIMELINE_DIR")
+	// Validate before touching anything (the simulator's version of decision 39).
+	for _, c := range []struct {
+		ok  bool
+		msg string
+	}{
+		{nShards > 0, "N_SHARDS must be positive"},
+		{rounds >= 0, "ROUNDS must be non-negative (0 = forever)"},
+		{gap >= 0, "ROUND_GAP must be non-negative"},
+		{cfg.Shard.PollInterval > 0, "POLL_INTERVAL must be positive"},
+		{cfg.MinWorkers >= 0, "MIN_WORKERS must be non-negative"},
+		{cfg.RoundTimeout > 0, "ROUND_TIMEOUT must be positive"},
+	} {
+		if !c.ok {
+			fmt.Fprintln(os.Stderr, "bad config:", c.msg)
+			os.Exit(2)
+		}
+	}
 
 	sc, err := workload.PresetWithShards(scenario, nShards)
 	if err != nil {
@@ -82,7 +99,10 @@ func main() {
 		tl, err := sim.RunRound(ctx, api, w, cfg, log)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Info("stopped")
+				// Interrupted mid-round. The round stays open in Postgres (no
+				// "abandoned" state exists); say so, so an operator knows why a
+				// round never finished.
+				log.Warn("stopped by signal mid-round; the round is left open in Postgres", "err", err)
 				return
 			}
 			log.Error("round failed", "err", err)

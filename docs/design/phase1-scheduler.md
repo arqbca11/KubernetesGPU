@@ -238,6 +238,7 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 54 | **The shard's reaction to the report reply:** `done` → index ready, `needs_index` queries become runnable; `failed` → logged as an error, those queries stay stuck (open question); `gpu`/`queued` or `leased` while building locally → abort the local build at the next slice (preempt); `local`/`running` while not building → start the local build (renege, or the initial decision). A local build that finishes but is refused at `done` (409) was preempted in the gap and waits for the GPU | Poll `GET /builds/{id}` separately | The report reply is the one sync point (decision 29). The 409 case closes the race between the last slice and the done call. |
 | 55 | **Everything modeled is divided by one `TIME_SCALE`:** arrival offsets, query durations, the local build time (from the scheduler's `cpu_build_ms`). It is the same number as the worker's `FAKE_TIME_SCALE`, set once for the whole stack | Separate knobs | A round at 10x is a faithful compression of a round at 1x only if every duration shrinks together. |
 | 56 | **The timeline is built client-side** from the scheduler's round status (timestamps), the workload (what each query was: kind, cluster id, needs_index) and the shard's own events (submit decision, local build start/abort/done, preemption noticed, index ready). Reported: per-shard build and queries, shard finish, straggler lag (last finish minus median), cluster-query latency p50/p99 by kind | Store kind and cluster id in `shard_jobs` | The scheduler does not need to know what a query is for; the shard does. Keeping the schema free of workload concepts keeps the scheduler generic. |
+| 57 | **The simulator validates its configuration before touching the scheduler** (positive shard count, poll interval, time scale and round timeout; non-negative rounds, gap and minimum workers; a known scenario) and exits 2 naming the variable; on SIGTERM mid-round it logs that the round is left open and exits 0 | Fail at first use | A zero poll interval was accepted and produced a report storm until the round timed out (cross-check). An abandoned round has no state of its own; the log line is the record. |
 
 ## Implementation notes
 
@@ -397,6 +398,8 @@ All four roadmap failure tests pass on the Compose stack. Step 6 repeats them wi
 
 **First real round on the stack (2026-10-05, `test-logs/phase1/step5-compose-round.log`).** Skewed preset, 6 shards (sizes 33k to 200k), 2 workers, 10x time scale: 3,412 shard-level queries (1,792 cluster queries, 30% fan-out) over a 30 s modeled horizon. All six builds went to the GPU under policy v0 and finished at attempt 1 within 1.7 s real (17 s modeled); the round finished at 32.6 s modeled, set by the query horizon, with a straggler lag of 0.25 s. Fan-out latency p50 0.4 s, p99 1.9 s modeled; single-shard p50 0.1 s, p99 1.7 s. At 10x the scheduler took roughly 1,000 HTTP calls per second (three per query) without complaint; step 7's 50-shard round will multiply that by eight, which is the capacity question the generator agent raised.
 
+Details the cross-check asked to have stated: `seq` is 0-based and counts recorded arrivals (so it diverges from the workload index once pre-DDL queries are dropped); local builds stay at `attempt 0`, since only a claim increments it; a shard reacts to a preemption within one poll interval plus one slice (measured 189 ms at a 100 ms poll). **Time-scale fidelity:** each query's recorded run time includes the two HTTP calls that bracket it (`start`, `done`), so at a time scale of 20 a 20 ms query, which should take 1 ms, is recorded at 1.6 to 1.8 ms, and `duration_modeled` inflates that by the scale. Keep the scale such that scaled query durations are well above a few milliseconds, or move to batched, client-timestamped job reporting, which is the same change step 7 needs for capacity.
+
 **Open questions from the generator agent**, for the owner (recorded here, not decided):
 
 1. Should `NeedsIndex` be tied to fan-out, as an unfiltered vector search scatters to every shard? Today it is drawn per cluster query, independent of fan-out.
@@ -407,6 +410,18 @@ All four roadmap failure tests pass on the Compose stack. Step 6 repeats them wi
 6. Should index-needing queries cost more CPU than others?
 7. `math/rand/v2`'s derived methods are not promised stable across Go releases; store generated workloads as JSON alongside results, not only the seed.
 8. Capacity: at 50 shards a round is 30k to 40k shard-level queries; at 10x that is tens of thousands of HTTP calls per second with three calls per query. Step 7 will likely need batched reporting (one call per shard per poll interval carrying arrivals, starts and finishes).
+
+### Cross-check of step 5, the shard simulator (2026-10-05)
+
+A fresh agent ran the real `shardsim` binary against an in-process scheduler (`httptest`), a reaper loop and a fake GPU worker it played itself, observing only through Postgres, the binary's stdout and its timeline JSON. 9 tests, all passed: determinism of the replayed workload across processes; every query recorded once, in order, and finished, with one CPU per shard and builds done at attempt 1; `needs_index` queries never start before the build finishes while independent ones run; a local build occupies the CPU for exactly its scaled time; reports every poll interval with sticky `stream_done`; a preemption honoured within 100 ms with the independent queries draining on the freed CPU; SIGTERM exits in milliseconds; a bad scenario exits 2 with no traffic; the timeline JSON matches Postgres field for field across two mixed-placement rounds.
+
+| Finding | Resolution |
+| --- | --- |
+| `POLL_INTERVAL=0s` accepted: 746 requests in 3 s, then the round timed out. | Decision 57: validation at startup. |
+| SIGTERM mid-round exits 0 silently and leaves the round open with `finished_at` NULL. | Decision 57: a warning names the open round. No "abandoned" state exists; recorded as an open question. |
+| Query run times inflated 1.6 to 1.8x at a time scale of 20 by the bracketing HTTP calls. | Documented above as a fidelity bound; batched client-timestamped reporting (step 7) removes it. |
+| `seq` semantics, local `attempt 0`, preemption reaction time unstated. | Stated above. |
+| Pre-DDL dropping never exercised in a live round. | True; staggered is Phase 3's scenario (open question 4). |
 
 ### Cross-check of step 4, the Compose stack (2026-10-05)
 
@@ -466,6 +481,7 @@ Smoke test of the real binary: started before Postgres was ready (connect retry 
 ## Open questions
 
 - **A failed GPU build and a waiting `needs_index` job.** `FinishCompleteRounds` treats `failed` as terminal, but the shard's job that needs the index can never start, so the round stays open forever. Resubmitting is a no-op by design. Candidates: the scheduler re-places a failed GPU build as local; or the shard marks dependent jobs skipped; or failed builds are retried once on the GPU. Decide in Phase 4, when the recall gate makes failure real. Raised by the cross-check.
+- **An abandoned round.** If the simulator is stopped mid-round, the round stays open forever (`finished_at` NULL, builds queued or done). There is no round state to mark it. Candidates: a `cancelled_at` column set by a `DELETE`-like API call, or a reaper rule that closes rounds with no report for a long time. Decide when rounds are driven by the experiment runner (Phase 3).
 - Polling for build completion (decision 23) adds up to one poll interval per shard to the round. Revisit with long polling if Phase 3 measurements show it matters.
 
 - Should `failed` builds be retried automatically, or left for the shard to resubmit? Phase 1 leaves them; nothing fails in a fake build except a worker crash, which goes through reaping, not `failed`.
