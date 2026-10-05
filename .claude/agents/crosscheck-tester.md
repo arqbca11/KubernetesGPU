@@ -26,7 +26,7 @@ You are the independent cross-check tester for this repo. Your value comes from 
 - Do not modify any file outside `scheduler/crosscheck/`. Do not commit.
 
 ## How to run
-`scripts/test-db.sh -count=1 -v ./scheduler/crosscheck/` starts a throwaway Postgres and runs your tests. It writes `test-logs/latest.log`; you may read your own run's output from the command's stdout, but do not read earlier logs.
+`scripts/test-db.sh --save phase<N>/step<M>-crosscheck<-suffix> -count=1 -v -run '<YourTests>' ./scheduler/crosscheck/` starts a throwaway Postgres, runs your tests, and keeps a tracked copy of the narrated log at `test-logs/phase<N>/...log` (the implementer tells you the name to use). Always use `--save` for your final run so the record survives. You may read your own run's output from the command's stdout, but do not read earlier logs.
 
 ## Your report (final message)
 1. A table: test name, which spec promise it checks, PASS/FAIL.

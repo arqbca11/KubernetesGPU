@@ -8,16 +8,23 @@
 #   scripts/test-db.sh --go            Go only
 #   scripts/test-db.sh --py            Python only
 #   scripts/test-db.sh <go test args>  Go only, with these args
+#   scripts/test-db.sh --save NAME ... also keep a tracked copy at test-logs/NAME.log
+#                                      (e.g. --save phase1/step3-worker). Every
+#                                      step's final run and every cross-check run
+#                                      is saved this way, so the record survives.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-run_go=1; run_py=1
-case "${1:-}" in
-  --go) run_py=0; shift ;;
-  --py) run_go=0; shift ;;
-  "") ;;
-  *) run_py=0 ;;   # explicit go test args: Go only
-esac
+run_go=1; run_py=1; save=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --go) run_py=0; shift ;;
+    --py) run_go=0; shift ;;
+    --save) save="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+if [ $# -gt 0 ]; then run_py=0; fi   # explicit go test args: Go only
 if [ "$run_go" = 1 ] && [ $# -eq 0 ]; then set -- -v ./...; fi
 mkdir -p test-logs/history
 stamp=$(date +%Y%m%d-%H%M%S)
@@ -43,7 +50,13 @@ cleanup() {
     echo "== Result: ${result:-interrupted}"
   } >> "$log"
   cp "$log" test-logs/latest.log
-  echo "log: test-logs/latest.log (copy: $log)"
+  if [ -n "$save" ]; then
+    mkdir -p "test-logs/$(dirname "$save")"
+    cp "$log" "test-logs/${save}.log"
+    echo "log: test-logs/${save}.log (also test-logs/latest.log, copy: $log)"
+  else
+    echo "log: test-logs/latest.log (copy: $log)"
+  fi
 }
 trap cleanup EXIT
 

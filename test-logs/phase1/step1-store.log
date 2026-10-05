@@ -1,0 +1,157 @@
+== Go tests against a throwaway Postgres
+date:      2026-10-04 22:38:17 PDT
+commit:    10f9d16 (uncommitted changes)
+go:        go1.27.1
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-52488, port 34285)
+go:        go test -p 1 -count=1 -v ./scheduler/store/
+python:    skipped
+
+Lines starting with 'store_test.go:N:' are the test narrating what it did.
+Lines tagged [db] are the build row as Postgres had it at that moment.
+
+== go test
+=== RUN   TestClaimOrdersByPriorityThenAge
+    store_test.go:117: submitted build 1:1: placement=gpu priority=1 mem=1048576
+    store_test.go:118: submitted build 2:1: placement=gpu priority=5 mem=1048576
+    store_test.go:119: submitted build 3:1: placement=gpu priority=3 mem=1048576
+    store_test.go:130: claim #1 by worker w -> 2:1 (attempt 1)
+    store_test.go:130: claim #2 by worker w -> 3:1 (attempt 1)
+    store_test.go:130: claim #3 by worker w -> 1:1 (attempt 1)
+    store_test.go:139: order was [2:1 3:1 1:1]: priority 5, then 3, then 1, as expected
+    store_test.go:143: claim #4 on the empty queue -> nothing, as expected
+--- PASS: TestClaimOrdersByPriorityThenAge (0.05s)
+=== RUN   TestConcurrentClaimsNeverShareABuild
+    store_test.go:157: submitted 20 gpu builds, all priority 0
+    store_test.go:158: starting 8 workers that claim in a loop until the queue is empty
+    store_test.go:191: all 20 builds claimed, each exactly once: FOR UPDATE SKIP LOCKED kept the workers apart
+--- PASS: TestConcurrentClaimsNeverShareABuild (0.05s)
+=== RUN   TestFencingAfterReap
+    store_test.go:199: submitted build 1:3: placement=gpu priority=0 mem=1048576
+    store_test.go:205: worker-1 claims -> attempt 1, lease 30s
+    store_test.go:206:   [db] build 1:3: placement=gpu state=leased  attempt=1 lease_owner=worker-1 lease_expires_in=30s
+    store_test.go:213: reaper runs while the lease is live -> 0 rows changed
+    store_test.go:216: worker-1 stops renewing (kill -9, or SIGSTOP)
+    store_test.go:217:   (test) forced lease of 1:3 into the past, as if the worker had stopped renewing
+    store_test.go:218:   [db] build 1:3: placement=gpu state=leased  attempt=1 lease_owner=worker-1 lease_expires_in=-1s
+    store_test.go:67:   [reaper] build 1:3 attempt 1 (was leased to worker-1) -> queued
+    store_test.go:223: reaper runs after expiry -> 1 row back to queued
+    store_test.go:227:   [db] build 1:3: placement=gpu state=queued  attempt=1 lease_owner=- lease_expires_in=-
+    store_test.go:233: reaper runs again -> 0 rows changed (idempotent)
+    store_test.go:239: worker-2 claims -> attempt 2 (the fencing token moved on)
+    store_test.go:240:   [db] build 1:3: placement=gpu state=leased  attempt=2 lease_owner=worker-2 lease_expires_in=30s
+    store_test.go:243: worker-1 wakes up (SIGCONT) still holding attempt 1 and tries to carry on:
+    store_test.go:248:   renew(attempt 1)    -> rejected (0 rows)
+    store_test.go:253:   complete(attempt 1) -> rejected (0 rows)
+    store_test.go:258:   fail(attempt 1)     -> rejected (0 rows)
+    store_test.go:262:   [db] build 1:3: placement=gpu state=leased  attempt=2 lease_owner=worker-2 lease_expires_in=30s
+    store_test.go:269: worker-2 renew(attempt 2)    -> accepted
+    store_test.go:274: worker-2 complete(attempt 2) -> accepted
+    store_test.go:278:   [db] build 1:3: placement=gpu state=done    attempt=2 lease_owner=- lease_expires_in=-
+    store_test.go:284: worker-2 completes again       -> rejected (already done)
+    store_test.go:289: reaper runs on the done build -> 0 rows changed
+    store_test.go:290: result: the build finished exactly once, by worker-2
+--- PASS: TestFencingAfterReap (0.02s)
+=== RUN   TestReleaseReturnsToQueueAndFences
+    store_test.go:297: submitted build 1:4: placement=gpu priority=0 mem=1048576
+    store_test.go:300: w1 claims -> attempt 1
+    store_test.go:304: w1 gets SIGTERM and releases the build instead of finishing
+    store_test.go:308:   [db] build 1:4: placement=gpu state=queued  attempt=1 lease_owner=- lease_expires_in=-
+    store_test.go:313: w2 claims -> attempt 2
+    store_test.go:317: w1 complete(attempt 1) -> rejected
+--- PASS: TestReleaseReturnsToQueueAndFences (0.01s)
+=== RUN   TestClaimRespectsWorkerMemory
+    store_test.go:324: submitted build 1:5: placement=gpu priority=10 mem=17179869184
+    store_test.go:325: submitted build 2:5: placement=gpu priority=0 mem=1073741824
+    store_test.go:332: 8 GiB worker claims -> 2:5 (skipped the 16 GiB build that was first in line)
+    store_test.go:337: 24 GiB worker claims -> 1:5
+--- PASS: TestClaimRespectsWorkerMemory (0.01s)
+=== RUN   TestDuplicateSubmitIsNoop
+    store_test.go:348: submitted 1:6 as gpu, priority 7
+    store_test.go:350: worker claims it -> attempt 1
+    store_test.go:351:   [db] build 1:6: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
+    store_test.go:359: shard resubmits the same build_id as local, priority 99 -> inserted=false
+    store_test.go:367:   [db] build 1:6: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
+    store_test.go:368: row unchanged: still gpu, priority 7, leased to the worker
+--- PASS: TestDuplicateSubmitIsNoop (0.01s)
+=== RUN   TestLocalBuildsAreNeverReaped
+    store_test.go:375: submitted build 1:7: placement=local priority=0 mem=1048576
+    store_test.go:379:   [db] build 1:7: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
+    store_test.go:383: a worker tries to claim -> nothing (local builds are not in the queue)
+    store_test.go:388: reaper runs -> 0 rows changed (local builds have no lease)
+    store_test.go:392: shard reports the local build done -> accepted
+    store_test.go:396: shard reports it again -> rejected
+    store_test.go:397:   [db] build 1:7: placement=local state=done    attempt=0 lease_owner=- lease_expires_in=-
+--- PASS: TestLocalBuildsAreNeverReaped (0.01s)
+=== RUN   TestHeartbeatAndPoolState
+    store_test.go:407: no workers registered -> pool is empty
+    store_test.go:410: workers a (8 GiB) and b (24 GiB) heartbeat
+    store_test.go:415: pool within 1 minute -> 2 live, largest 24 GiB
+    store_test.go:418:   (test) b's last_seen pushed 10 minutes into the past, as if it had died
+    store_test.go:423: pool within 1 minute -> 1 live, largest 8 GiB (b no longer counts)
+--- PASS: TestHeartbeatAndPoolState (0.01s)
+=== RUN   TestRoundFinishesOnlyWhenEveryShardIsDone
+    store_test.go:438: round expects 2 shards (decision 30: done = all builds terminal, all shards stream_done, all queries finished)
+    store_test.go:442: shard 1 submits a gpu build; two queries arrive at it over time
+    store_test.go:461: nothing done yet                                               -> rounds stamped: 0, round is open
+    store_test.go:461: shard 1 build done, queries finished, stream_done; shard 2 absent -> rounds stamped: 0, round is open
+    store_test.go:461: shard 2 submits a local build, one query waiting, stream not done -> rounds stamped: 0, round is open
+    store_test.go:461: shard 2 build done, query finished, but stream NOT reported done -> rounds stamped: 0, round is open
+    store_test.go:461: shard 2 reports stream_done with an empty queue                -> rounds stamped: 1, round is finished
+    store_test.go:461: run again                                                      -> rounds stamped: 0, round is finished
+    store_test.go:504: round finished_at equals the last query's finished_at, not the time of the stream_done report
+--- PASS: TestRoundFinishesOnlyWhenEveryShardIsDone (0.02s)
+=== RUN   TestPreemptAndRenegeTransitions
+    store_test.go:514: submitted build 1:9: placement=local priority=0 mem=1048576
+    store_test.go:515:   [db] build 1:9: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
+    store_test.go:517: decision 31: preempt a running local build to the gpu queue
+    store_test.go:521:   [db] build 1:9: placement=gpu state=queued  attempt=0 lease_owner=- lease_expires_in=-
+    store_test.go:530: preempting again -> rejected (not running/local any more)
+    store_test.go:534: the shard, unaware, reports its local build done -> rejected: that is how it learns
+    store_test.go:536: renege the queued gpu build back to local
+    store_test.go:540:   [db] build 1:9: placement=local state=running attempt=0 lease_owner=- lease_expires_in=-
+    store_test.go:544: a worker tries to claim -> nothing; the build is local again
+    store_test.go:546: a leased build is never moved
+    store_test.go:552:   [db] build 1:9: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
+    store_test.go:556: renege on a leased build -> rejected; attempt is 1, bumped by the claim, untouched by the moves
+--- PASS: TestPreemptAndRenegeTransitions (0.01s)
+=== RUN   TestSchemaRefusesOrphanShardRows
+    store_test.go:563: submitted build 1:10: placement=gpu priority=0 mem=1048576
+    store_test.go:564: decision 33 / migration 0004: shard_status and shard_jobs reference builds (round_id, shard_id)
+    store_test.go:569: raw INSERT into shard_status for shard 99 (no build) -> ERROR: insert or update on table "shard_status" violates foreign key constraint "shard_status_build_fk" (SQLSTATE 23503)
+    store_test.go:574: raw INSERT into shard_jobs for shard 99 (no build)   -> ERROR: insert or update on table "shard_jobs" violates foreign key constraint "shard_jobs_build_fk" (SQLSTATE 23503)
+    store_test.go:580: raw INSERT of a second build for shard 1 in the round -> ERROR: duplicate key value violates unique constraint "builds_round_shard_unique" (SQLSTATE 23505)
+    store_test.go:592: ReportStatus and RecordArrival for shard 99 -> ErrNoBuild (mapped from SQLSTATE 23503)
+    store_test.go:596: ReportStatus for shard 1 (has a build) -> ok
+--- PASS: TestSchemaRefusesOrphanShardRows (0.01s)
+=== RUN   TestReapFailsBuildAfterRetryBudget
+    store_test.go:606: submitted build 1:11: placement=gpu priority=0 mem=1048576
+    store_test.go:607: submitted build 2:11: placement=gpu priority=0 mem=1048576
+    store_test.go:609: MAX_ATTEMPTS=3; the poison build kills every worker that claims it (no fail, no complete, lease just expires)
+    store_test.go:616: worker-1 claims 1:11 -> attempt 1, then dies
+    store_test.go:617:   (test) forced lease of 1:11 into the past, as if the worker had stopped renewing
+    store_test.go:618:   [reaper] build 1:11 attempt 1 (was leased to worker-1) -> queued
+    store_test.go:616: worker-2 claims 1:11 -> attempt 2, then dies
+    store_test.go:617:   (test) forced lease of 1:11 into the past, as if the worker had stopped renewing
+    store_test.go:618:   [reaper] build 1:11 attempt 2 (was leased to worker-2) -> queued
+    store_test.go:616: worker-3 claims 1:11 -> attempt 3, then dies
+    store_test.go:617:   (test) forced lease of 1:11 into the past, as if the worker had stopped renewing
+    store_test.go:618:   [reaper] build 1:11 attempt 3 (was leased to worker-3) -> failed
+    store_test.go:632:   [db] 1:11: failed, reason="lease expired on attempt 3 of 3: retry budget exhausted"
+    store_test.go:633:   [db] build 1:11: placement=gpu state=failed  attempt=3 lease_owner=- lease_expires_in=-
+    store_test.go:637: the poison build is parked as failed; the queue is clear of it
+    store_test.go:643: worker-4 claims -> 2:11: the pool is working again
+    store_test.go:646:   (test) forced lease of 2:11 into the past, as if the worker had stopped renewing
+    store_test.go:647:   [reaper] build 2:11 attempt 1 (was leased to worker-4) -> queued
+    store_test.go:651: MAX_ATTEMPTS=0 disables the budget: an expired lease is requeued regardless of attempt
+--- PASS: TestReapFailsBuildAfterRetryBudget (0.02s)
+PASS
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/store	0.521s
+
+== Docker events for container kgpu-test-pg-52488
+  22:38:16  create
+  22:38:16  start
+  22:38:18  kill
+  22:38:18  die
+  22:38:18  destroy
+
+== Result: PASS
