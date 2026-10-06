@@ -36,6 +36,10 @@ flowchart LR
 | 2 | Keep artifact fencing from Phase 4 | Trust Job semantics | Kubernetes may start a replacement pod while the original still runs on a partitioned node. |
 | 3 | Measure dispatch latency and GPU idle time against the long-running-worker design | Assume one is better | Per-build pods pay startup and image pull; long-running workers hold GPUs while idle. The number decides. |
 
+## What the published figures change here (2026-10-06)
+
+The comparison in decision 3 (long-running workers vs one Job per build) was framed with fake builds of seconds, where a pod's startup and a multi-gigabyte cuVS image pull dominate. Real GPU builds are 17 seconds to several minutes, so per-build pods amortise their startup far better than the Phase 1 scale suggested, and the expected outcome of the measurement is no longer obvious. The measurement should be run at production sizes in the simulator's model as well as live.
+
 ## Open questions
 
 - Is this phase worth doing at all, versus writing the mapping table from reading the Kueue docs? The measurement in decision 3 is the only thing that needs it built.

@@ -289,6 +289,8 @@ A workload is a seeded combination of four knobs: size distribution, query strea
 | Downstream-heavy | Medium builds; one shard has a much higher query rate, mostly needing the index | The critical path is set by the queries behind the build, not by build size. Reactive migration should notice from the report alone. |
 | Staggered | Shards submit at different times within the round | Speculation and reneging. GPUs sit idle while CPU builds are mid-flight. |
 | Shrinking pool | A worker dies or is drained mid-round | Reneging queued jobs back to local. |
+| High-dim | 1536-dimension vectors at the same sizes | Transfer rivals the GPU build and memory binds (published figures: 61 GB of vectors for 10M x 1536; 24 GB GPUs hold 5M). |
+| Production size | 1 to 10M vectors, 768 to 1536 dimensions; simulator only | The sizes the scheduler would meet in production, 10 to 100x the fake workload; hour-long CPU builds make sunk cost and preemption loss real. |
 
 ### Sweeps
 
@@ -300,6 +302,8 @@ A workload is a seeded combination of four knobs: size distribution, query strea
 | Query load relative to build work (arrival rate × duration) | 0.5×, 1×, 2× | When blocking the shard costs the most |
 | `needs_index` fraction | 0, 0.5, 1 | When freeing the CPU early helps, and when only a finished index does |
 | Shard count | 6, 50 | Whether conclusions from the small setup hold at scale |
+| Vector dimension | 128, 768, 1536 | When transfer and GPU memory start to decide placement |
+| GPU speedup | 10x, 40x | End-to-end service figures vs build-step benchmarks; where the threshold policy's optimum sits |
 
 ### Steps
 
@@ -321,7 +325,7 @@ Workers are still CPU-only here, so give them more cores than a shard gets (e.g.
 
 ### Data
 
-- [ ] Use an ann-benchmarks dataset. SIFT-128 (1M vectors) or GloVe-100 fits on a laptop.
+- [ ] Use an ann-benchmarks dataset. SIFT-128 (1M vectors) or GloVe-100 fits on a laptop. Add a high-dimension subset (768 or 1536) of a few hundred thousand vectors so the dimension term is measured, not assumed.
 - [ ] Split it across 50 shards with Zipf-distributed sizes, capped so the total fits in memory
 - [ ] Store each shard's vectors in MinIO as `.npy` files
 - [ ] Compute exact ground truth per shard once with brute force, for the recall gate
