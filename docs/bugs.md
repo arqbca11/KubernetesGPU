@@ -6,6 +6,24 @@ Entries are added when a bug changes how we think about the system, is subtle en
 
 ---
 
+## 8. Every simulated query ran 0.6 ms longer than modeled: a fixed overhead that scales with the time scale
+
+**Found:** 2026-10-06, by the step 7 cross-check's run-time fidelity test at 50 shards (and confirmed at 6). Fixed in [`2e601f3`](https://github.com/arqbca11/KubernetesGPU/commit/2e601f3), `shard/sim/shard.go` (`runQuery`). **Related:** the step 5 cross-check's time-scale finding (the HTTP calls inside the measured interval), which decision 60 fixed; this is the residue underneath it.
+
+**Symptom.** Across 31,087 queries in one round, every recorded run time (`finished_at - started_at`) was the scaled modeled duration plus about 0.56 ms (p50), never less. Aggregate run time was 105.5% of modeled. By size: queries under 1 ms ran at 1.77x, 1 to 5 ms at 1.19x, over 100 ms at 1.004x. The same 0.6 ms appeared at 6 shards, so it was not load.
+
+**Why it matters.** The overhead is fixed per query, so it grows with the time scale: at 10x a median 12 ms query becomes 1.2 ms real plus 0.6, about 1.5x. The shard's CPU is then busier than the model says by tens of percent, queues grow faster than they should, and queue growth is exactly what the Phase 3 experiments measure. Every 10x number in the step 7 notes was taken with this inflation.
+
+**Cause.** `runQuery` took `started = now`, slept the scaled duration with a relative timer, then took `finished = now`. A timer never wakes early and usually wakes a little late (Go timer granularity plus goroutine scheduling, about half a millisecond here), so the recorded run time was the sleep plus the slop, and the next query started only after that, so the slop accumulated into throughput.
+
+**Fix (decision 65).** The CPU is a virtual clock. A query starts at the later of "the CPU is free" and "the query arrived", finishes exactly its scaled duration later, and both timestamps are recorded from that clock; the goroutine sleeps to the absolute finish deadline. A late wake-up no longer stretches the recorded run time, and it does not accumulate, because the next sleep is to an absolute time and is shorter by the same amount. The shard runs at most one slop behind real time.
+
+**What it would have looked like in production.** Nothing: this is a simulator defect. What it would have looked like in the results: every policy comparison at high time scale would have run on shards 20 to 50 percent busier than the scenario said, and the conclusions about when local builds hurt would have been drawn from the wrong load.
+
+**Lesson.** A relative sleep measures "at least this long". For anything whose duration is the measurement, keep a virtual clock, record from it, and use real sleeps only to pace it. And a fidelity claim ("sleeps exactly the scaled duration") needs a test that checks it against every record, not a lower bound.
+
+---
+
 ## 7. Workers crashed when Postgres restarted
 
 **Found:** 2026-10-05, by the Compose cross-check agent's `docker compose restart postgres` test. Fixed in [`51716f8`](https://github.com/arqbca11/KubernetesGPU/commit/51716f8), `worker/kgpu_worker/worker.py` and `store.py`. **Related:** entry 5 (same class: an exit path while holding a lease that nothing guarded).
