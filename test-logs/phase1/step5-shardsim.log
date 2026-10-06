@@ -1,8 +1,8 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-05 22:01:04 PDT
-commit:    97fb5c8 (uncommitted changes)
+date:      2026-10-05 23:25:30 PDT
+commit:    d1052fe (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-83380, port 24976)
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-85389, port 24313)
 go:        go test -p 1 -count=1 -v ./shard/sim/ ./shard/client/
 python:    skipped
 
@@ -11,72 +11,94 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
 
 == go test
 === RUN   TestTwoShardRoundEndToEnd
-    sim_test.go:102:   [worker gpu-1] claimed 1:1 attempt 1, building 525ms
     sim_test.go:102:   [worker gpu-1] claimed 0:1 attempt 1, building 232ms
+    sim_test.go:102:   [worker gpu-1] claimed 1:1 attempt 1, building 525ms
     sim_test.go:158: 
         round 1  scenario=test-two seed=1  time_scale=20
-        duration 1.0s real (20.5s modeled)   straggler lag 0.0s   builds: 2 gpu, 0 local   queries: 6
+        duration 1.0s real (20.7s modeled)   straggler lag 0.0s   builds: 2 gpu, 0 local   queries: 6
         query latency (slowest piece): fan-out p50 0.1s p99 0.1s (n=2)   single-shard p50 0.1s p99 0.1s (n=2)
         shard  n_vectors place  att  submit   b.start  b.done   finish   queries max wait
-        0      100000    gpu    1    0.0s     0.6s     0.8s     1.0s     3       0.8s     ##############################
-        1      300000    gpu    1    0.0s     0.1s     0.6s     0.7s     3       0.5s     #####################
-    sim_test.go:161:   shard 0 + 0.02s submitted: placement=gpu (always_gpu); cpu_build=20.631s gpu_total=4.639s (modeled)
-    sim_test.go:161:   shard 0 + 0.16s query 0 done: fanout  waited 112ms
-    sim_test.go:161:   shard 0 + 0.30s stream exhausted: 3 queries arrived (0 before the DDL were not replayed)
-    sim_test.go:161:   shard 0 + 0.37s query 2 done: single  waited 65ms
-    sim_test.go:161:   shard 0 + 0.92s index ready (attempt 1, gpu)
-    sim_test.go:161:   shard 0 + 1.03s query 1 done: fanout needs_index waited 925ms
-    sim_test.go:161:   shard 0 + 1.03s shard done: build done, stream exhausted, queue empty
-    sim_test.go:161:   shard 1 + 0.01s submitted: placement=gpu (always_gpu); cpu_build=1m7.799s gpu_total=10.507s (modeled)
-    sim_test.go:161:   shard 1 + 0.16s stream exhausted: 3 queries arrived (0 before the DDL were not replayed)
-    sim_test.go:161:   shard 1 + 0.16s query 0 done: fanout  waited 112ms
-    sim_test.go:161:   shard 1 + 0.21s query 2 done: single  waited 63ms
-    sim_test.go:161:   shard 1 + 0.61s index ready (attempt 1, gpu)
-    sim_test.go:161:   shard 1 + 0.72s query 1 done: fanout needs_index waited 624ms
-    sim_test.go:161:   shard 1 + 0.72s shard done: build done, stream exhausted, queue empty
-    sim_test.go:196: cluster query 2 (fan-out, needs_index) latency = slowest piece = 922ms
---- PASS: TestTwoShardRoundEndToEnd (1.30s)
+        0      100000    gpu    1    0.0s     0.1s     0.3s     0.5s     3       0.3s     #############
+        1      300000    gpu    1    0.0s     0.3s     0.8s     1.0s     3       0.8s     ##############################
+    sim_test.go:161:   shard 0 + 0.00s DDL received: submitting; the CPU runs no queries until the placement is known
+    sim_test.go:161:   shard 0 + 0.02s submitted: placement=gpu (always_gpu); cpu_build=20.631s gpu_total=4.639s (modeled); 0 query records from before the DDL to backfill
+    sim_test.go:161:   shard 0 + 0.15s query 0 done: fanout  waited 0s
+    sim_test.go:161:   shard 0 + 0.30s stream exhausted: 3 queries arrived
+    sim_test.go:161:   shard 0 + 0.32s index ready (attempt 1, gpu)
+    sim_test.go:161:   shard 0 + 0.36s query 2 done: single  waited 8ms
+    sim_test.go:161:   shard 0 + 0.46s query 1 done: fanout needs_index waited 258ms
+    sim_test.go:161:   shard 0 + 0.46s shard done: build done, stream exhausted, queue empty
+    sim_test.go:161:   shard 1 + 0.00s DDL received: submitting; the CPU runs no queries until the placement is known
+    sim_test.go:161:   shard 1 + 0.02s submitted: placement=gpu (always_gpu); cpu_build=1m7.799s gpu_total=10.507s (modeled); 0 query records from before the DDL to backfill
+    sim_test.go:161:   shard 1 + 0.15s stream exhausted: 3 queries arrived
+    sim_test.go:161:   shard 1 + 0.15s query 0 done: fanout  waited 0s
+    sim_test.go:161:   shard 1 + 0.20s query 2 done: single  waited 1ms
+    sim_test.go:161:   shard 1 + 0.93s index ready (attempt 1, gpu)
+    sim_test.go:161:   shard 1 + 1.03s query 1 done: fanout needs_index waited 833ms
+    sim_test.go:161:   shard 1 + 1.03s shard done: build done, stream exhausted, queue empty
+    sim_test.go:196: cluster query 2 (fan-out, needs_index) latency = slowest piece = 934ms
+--- PASS: TestTwoShardRoundEndToEnd (1.40s)
 === RUN   TestLocalBuildBlocksThenDrains
     sim_test.go:223: 
         round 2  scenario=test-local seed=1  time_scale=20
-        duration 1.3s real (25.1s modeled)   straggler lag 0.0s   builds: 0 gpu, 1 local   queries: 2
+        duration 1.3s real (25.0s modeled)   straggler lag 0.0s   builds: 0 gpu, 1 local   queries: 2
         query latency (slowest piece): fan-out p50 0.0s p99 0.0s (n=0)   single-shard p50 1.1s p99 1.1s (n=2)
         shard  n_vectors place  att  submit   b.start  b.done   finish   queries max wait
         0      100000    local  0    0.0s     0.0s     1.0s     1.3s     2       1.0s     ##############################
-    sim_test.go:225:   + 0.01s submitted: placement=local (needs 102400000 bytes, largest live worker has 1); cpu_build=20.631s gpu_total=4.639s (modeled)
+    sim_test.go:225:   + 0.00s DDL received: submitting; the CPU runs no queries until the placement is known
+    sim_test.go:225:   + 0.01s submitted: placement=local (needs 102400000 bytes, largest live worker has 1); cpu_build=20.631s gpu_total=4.639s (modeled); 0 query records from before the DDL to backfill
     sim_test.go:225:   + 0.01s local build started (1.032s scaled)
-    sim_test.go:225:   + 0.10s stream exhausted: 2 queries arrived (0 before the DDL were not replayed)
-    sim_test.go:225:   + 1.05s local build done after 1.037s
-    sim_test.go:225:   + 1.15s query 0 done: single  waited 1.1s
-    sim_test.go:225:   + 1.25s query 1 done: single needs_index waited 1.154s
+    sim_test.go:225:   + 0.10s stream exhausted: 2 queries arrived
+    sim_test.go:225:   + 1.05s local build done after 1.036s
+    sim_test.go:225:   + 1.15s query 0 done: single  waited 995ms
+    sim_test.go:225:   + 1.25s query 1 done: single needs_index waited 1.047s
     sim_test.go:225:   + 1.25s shard done: build done, stream exhausted, queue empty
     sim_test.go:236: both queries waited for the local build: the CPU was occupied (modeling assumption)
---- PASS: TestLocalBuildBlocksThenDrains (1.46s)
+--- PASS: TestLocalBuildBlocksThenDrains (1.57s)
 === RUN   TestPreemptionAbortsLocalBuild
     sim_test.go:270:   [reconsider] preempt 0:3 at progress 21% -> true
     sim_test.go:102:   [worker big] claimed 0:3 attempt 1, building 678ms
     sim_test.go:281: 
         round 3  scenario=test-preempt seed=1  time_scale=20
-        duration 1.9s real (37.3s modeled)   straggler lag 0.0s   builds: 1 gpu, 0 local   queries: 2
+        duration 1.9s real (37.5s modeled)   straggler lag 0.0s   builds: 1 gpu, 0 local   queries: 2
         query latency (slowest piece): fan-out p50 0.0s p99 0.0s (n=0)   single-shard p50 1.1s p99 1.1s (n=2)
         shard  n_vectors place  att  submit   b.start  b.done   finish   queries max wait
         0      400000    gpu    1    0.0s     1.0s     1.7s     1.9s     2       1.8s     ##############################
-    sim_test.go:284:   + 0.01s submitted: placement=local (needs 409600000 bytes, largest live worker has 1); cpu_build=1m32.461s gpu_total=13.55s (modeled)
+    sim_test.go:284:   + 0.00s DDL received: submitting; the CPU runs no queries until the placement is known
+    sim_test.go:284:   + 0.01s submitted: placement=local (needs 409600000 bytes, largest live worker has 1); cpu_build=1m32.461s gpu_total=13.55s (modeled); 0 query records from before the DDL to backfill
     sim_test.go:284:   + 0.01s local build started (4.623s scaled)
-    sim_test.go:284:   + 0.05s stream exhausted: 2 queries arrived (0 before the DDL were not replayed)
+    sim_test.go:284:   + 0.05s stream exhausted: 2 queries arrived
     sim_test.go:284:   + 1.11s scheduler moved the build to the gpu (leased): aborting the local build
     sim_test.go:284:   + 1.12s local build aborted at 24%: preempted to the gpu queue
-    sim_test.go:284:   + 1.17s query 0 done: single  waited 1.15s
+    sim_test.go:284:   + 1.17s query 0 done: single  waited 1.096s
     sim_test.go:284:   + 1.81s index ready (attempt 1, gpu)
-    sim_test.go:284:   + 1.87s query 1 done: single needs_index waited 1.818s
+    sim_test.go:284:   + 1.87s query 1 done: single needs_index waited 1.771s
     sim_test.go:284:   + 1.87s shard done: build done, stream exhausted, queue empty
     sim_test.go:300: preemption freed the CPU: the independent query ran during the gpu build; the index query waited for it
---- PASS: TestPreemptionAbortsLocalBuild (2.08s)
+--- PASS: TestPreemptionAbortsLocalBuild (2.19s)
+=== RUN   TestPreDDLQueriesRunAndAreBackfilled
+    sim_test.go:102:   [worker gpu-1] claimed 0:4 attempt 1, building 232ms
+    sim_test.go:327: 
+        round 4  scenario=test-staggered seed=1  time_scale=20
+        duration 1.9s real (38.4s modeled)   straggler lag 0.0s   builds: 1 gpu, 0 local   queries: 3
+        query latency (slowest piece): fan-out p50 0.0s p99 0.0s (n=0)   single-shard p50 0.4s p99 0.4s (n=3)
+        shard  n_vectors place  att  submit   b.start  b.done   finish   queries max wait
+        0      100000    gpu    1    1.0s     1.0s     1.3s     1.9s     3       0.8s     ##############################
+    sim_test.go:330:   + 0.50s query 0 done: single  waited 3ms
+    sim_test.go:330:   + 1.00s DDL received: submitting; the CPU runs no queries until the placement is known
+    sim_test.go:330:   + 1.01s submitted: placement=gpu (always_gpu); cpu_build=20.631s gpu_total=4.639s (modeled); 4 query records from before the DDL to backfill
+    sim_test.go:330:   + 1.31s index ready (attempt 1, gpu)
+    sim_test.go:330:   + 1.50s stream exhausted: 3 queries arrived
+    sim_test.go:330:   + 1.62s query 1 done: single needs_index waited 815ms
+    sim_test.go:330:   + 1.92s query 2 done: single  waited 116ms
+    sim_test.go:330:   + 1.92s shard done: build done, stream exhausted, queue empty
+    sim_test.go:349: pre-DDL queries ran before the submit and were backfilled with their true times; run times 300ms, 300ms, 300ms (modeled 6 s / 20)
+--- PASS: TestPreDDLQueriesRunAndAreBackfilled (2.25s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/shard/sim	5.346s
+ok  	github.com/arqbca11/KubernetesGPU/shard/sim	7.870s
 === RUN   TestRetriesTransientFailuresThenSucceeds
-    client_test.go:35: two 503s then 200: code=200 round_id=7 err=<nil> after 3 requests in 604ms
---- PASS: TestRetriesTransientFailuresThenSucceeds (0.60s)
+    client_test.go:35: two 503s then 200: code=200 round_id=7 err=<nil> after 3 requests in 605ms
+--- PASS: TestRetriesTransientFailuresThenSucceeds (0.61s)
 === RUN   TestGivesUpAfterRetryFor
     client_test.go:48: always 502: err=GET /healthz: gave up after 3 attempts over 700ms: GET /healthz: 502  after 604ms
 --- PASS: TestGivesUpAfterRetryFor (0.60s)
@@ -87,13 +109,13 @@ ok  	github.com/arqbca11/KubernetesGPU/shard/sim	5.346s
     client_test.go:85: 409 on start and done accepted as 'already recorded'
 --- PASS: TestJobStartTreats409AsRecorded (0.00s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/shard/client	1.490s
+ok  	github.com/arqbca11/KubernetesGPU/shard/client	1.588s
 
-== Docker events for container kgpu-test-pg-83380
-  22:01:03  create
-  22:01:03  start
-  22:01:12  kill
-  22:01:12  die
-  22:01:12  destroy
+== Docker events for container kgpu-test-pg-85389
+  23:25:29  create
+  23:25:29  start
+  23:25:40  kill
+  23:25:40  die
+  23:25:40  destroy
 
 == Result: PASS

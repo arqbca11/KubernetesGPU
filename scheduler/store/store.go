@@ -527,6 +527,99 @@ func (s *Store) ListJobs(ctx context.Context, roundID int64) ([]JobRow, error) {
 	return out, rows.Err()
 }
 
+// JobRecord is one query as the shard reports it in a batch (decision 60):
+// timestamps are the shard's own clock. StartedAt and FinishedAt may be nil
+// for a query that has arrived but not yet run.
+type JobRecord struct {
+	Seq        int32      `json:"seq"`
+	DurationMs int64      `json:"duration_ms"`
+	NeedsIndex bool       `json:"needs_index"`
+	ArrivedAt  time.Time  `json:"arrived_at"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
+// ReportBatch is a shard's load report plus the query records that changed
+// since its last report, written in one transaction: the records first, then
+// the status, so a report that says stream_done carries its last arrivals.
+// Resending a batch is harmless: records are upserted and timestamps only
+// ever fill in (COALESCE), never change once set. ErrNoBuild if the shard has
+// no build; ErrStreamDone if the batch brings new arrivals after stream_done.
+func (s *Store) ReportBatch(ctx context.Context, st ShardStatus, jobs []JobRecord) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	if len(jobs) > 0 {
+		var streamDone bool
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE((SELECT stream_done FROM shard_status WHERE round_id = $1 AND shard_id = $2), false)`,
+			st.RoundID, st.ShardID).Scan(&streamDone); err != nil {
+			return err
+		}
+		if streamDone {
+			// New arrivals after stream_done contradict the shard's own word; a
+			// resend of already-known records is fine. Check whether any is new.
+			seqs := make([]int32, len(jobs))
+			for i, j := range jobs {
+				seqs[i] = j.Seq
+			}
+			var known int
+			if err := tx.QueryRow(ctx,
+				`SELECT COUNT(*) FROM shard_jobs WHERE round_id = $1 AND shard_id = $2 AND seq = ANY($3)`,
+				st.RoundID, st.ShardID, seqs).Scan(&known); err != nil {
+				return err
+			}
+			if known < len(jobs) {
+				return ErrStreamDone
+			}
+		}
+		n := len(jobs)
+		seqs, durs, needs := make([]int32, n), make([]int64, n), make([]bool, n)
+		arr, started, finished := make([]time.Time, n), make([]*time.Time, n), make([]*time.Time, n)
+		for i, j := range jobs {
+			seqs[i], durs[i], needs[i], arr[i], started[i], finished[i] = j.Seq, j.DurationMs, j.NeedsIndex, j.ArrivedAt, j.StartedAt, j.FinishedAt
+		}
+		// One statement for the whole batch (decision 60: control-plane rates).
+		_, err = tx.Exec(ctx, `
+			INSERT INTO shard_jobs (round_id, shard_id, seq, duration_ms, needs_index, arrived_at, started_at, finished_at)
+			SELECT $1, $2, u.seq, u.dur, u.needs, u.arr, u.started, u.finished
+			FROM unnest($3::int[], $4::bigint[], $5::boolean[], $6::timestamptz[], $7::timestamptz[], $8::timestamptz[])
+			     AS u(seq, dur, needs, arr, started, finished)
+			ON CONFLICT (round_id, shard_id, seq) DO UPDATE SET
+			  started_at  = COALESCE(shard_jobs.started_at,  EXCLUDED.started_at),
+			  finished_at = COALESCE(shard_jobs.finished_at, EXCLUDED.finished_at)`,
+			st.RoundID, st.ShardID, seqs, durs, needs, arr, started, finished)
+		if isForeignKeyViolation(err) {
+			return ErrNoBuild
+		}
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO shard_status
+		  (round_id, shard_id, queue_depth, waiting_needs_index, oldest_wait_ms, build_progress, stream_done, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		ON CONFLICT (round_id, shard_id) DO UPDATE SET
+		  queue_depth = EXCLUDED.queue_depth,
+		  waiting_needs_index = EXCLUDED.waiting_needs_index,
+		  oldest_wait_ms = EXCLUDED.oldest_wait_ms,
+		  build_progress = EXCLUDED.build_progress,
+		  stream_done = shard_status.stream_done OR EXCLUDED.stream_done,
+		  updated_at = now()`,
+		st.RoundID, st.ShardID, st.QueueDepth, st.WaitingNeedsIndex, st.OldestWaitMs, st.BuildProgress, st.StreamDone)
+	if isForeignKeyViolation(err) {
+		return ErrNoBuild
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // ---- shard status ---------------------------------------------------------
 
 // ShardStatus is a shard's load report (decision 29): the scheduler's only

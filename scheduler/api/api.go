@@ -333,6 +333,10 @@ type ReportRequest struct {
 	OldestWaitMs      int64   `json:"oldest_wait_ms"`
 	BuildProgress     float32 `json:"build_progress"`
 	StreamDone        bool    `json:"stream_done"`
+	// Jobs is the batch of query records that changed since the last report
+	// (decision 60): new arrivals, and starts/finishes of earlier ones, with
+	// the shard's own timestamps. Optional; the per-event job endpoints remain.
+	Jobs []store.JobRecord `json:"jobs,omitempty"`
 }
 
 type BuildSummary struct {
@@ -366,6 +370,23 @@ func (s *Server) shardReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "report fields out of range")
 		return
 	}
+	for i, j := range req.Jobs {
+		switch {
+		case j.Seq < 0 || j.DurationMs < 0 || j.ArrivedAt.IsZero():
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("jobs[%d]: seq and duration_ms must be non-negative and arrived_at set", i))
+			return
+		case j.StartedAt != nil && j.StartedAt.Before(j.ArrivedAt):
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("jobs[%d]: started_at before arrived_at", i))
+			return
+		case j.FinishedAt != nil && (j.StartedAt == nil || j.FinishedAt.Before(*j.StartedAt)):
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("jobs[%d]: finished_at without started_at or before it", i))
+			return
+		}
+	}
+	if len(req.Jobs) > 10000 {
+		writeError(w, http.StatusBadRequest, "jobs batch too large (max 10000)")
+		return
+	}
 	ctx := r.Context()
 	b, found, err := s.st.GetBuild(ctx, store.BuildID(shard, round))
 	if err != nil {
@@ -376,17 +397,29 @@ func (s *Server) shardReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "this shard has no build in this round; submit first")
 		return
 	}
-	err = s.st.ReportStatus(ctx, store.ShardStatus{
+	status := store.ShardStatus{
 		RoundID: round, ShardID: shard, QueueDepth: req.QueueDepth, WaitingNeedsIndex: req.WaitingNeedsIndex,
 		OldestWaitMs: req.OldestWaitMs, BuildProgress: req.BuildProgress, StreamDone: req.StreamDone,
-	})
+	}
+	if len(req.Jobs) > 0 {
+		err = s.st.ReportBatch(ctx, status, req.Jobs)
+	} else {
+		err = s.st.ReportStatus(ctx, status)
+	}
 	if errors.Is(err, store.ErrNoBuild) {
 		writeError(w, http.StatusNotFound, err.Error()+"; submit first")
 		return
 	}
-	if err != nil {
-		s.internal(w, "report status", err)
+	if errors.Is(err, store.ErrStreamDone) {
+		writeError(w, http.StatusConflict, "batch brings new arrivals after stream_done")
 		return
+	}
+	if err != nil {
+		s.internal(w, "report", err)
+		return
+	}
+	if len(req.Jobs) > 0 {
+		s.log.Debug("report batch", "round_id", round, "shard_id", shard, "build_id", store.BuildID(shard, round), "records", len(req.Jobs))
 	}
 	writeJSON(w, http.StatusOK, ReportResponse{Build: BuildSummary{
 		BuildID: b.BuildID, Placement: b.Placement, State: b.State, Attempt: b.Attempt,

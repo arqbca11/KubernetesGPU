@@ -299,3 +299,53 @@ func TestPreemptionAbortsLocalBuild(t *testing.T) {
 	}
 	t.Log("preemption freed the CPU: the independent query ran during the gpu build; the index query waited for it")
 }
+
+// Decisions 59 and 60: with a staggered DDL, queries that arrive before the
+// shard's DDL run on the CPU as normal and are backfilled, with their own
+// timestamps, once the build exists. Nothing about a query crosses HTTP while
+// it runs, so recorded durations are exact.
+func TestPreDDLQueriesRunAndAreBackfilled(t *testing.T) {
+	h := newHarness(t)
+	h.fakeWorker("gpu-1", 8<<30, scale)
+	time.Sleep(100 * time.Millisecond)
+	w := workload.Workload{
+		Scenario: workload.Scenario{Name: "test-staggered", NShards: 1, Dim: 128,
+			Stream: workload.StreamProfile{Horizon: 60 * time.Second}, DDL: workload.ArrivalPattern{Kind: "staggered", Spread: 20 * time.Second}},
+		Seed: 1,
+		Shards: []workload.ShardWorkload{{ShardID: 0, NVectors: 100_000, DDLOffset: 20 * time.Second, Queries: []workload.Query{ // DDL at 1 s real
+			q(4*time.Second, 6*time.Second, false, workload.KindSingleShard, 1),  // arrives 0.2 s, runs 0.3 s: before the DDL
+			q(10*time.Second, 6*time.Second, true, workload.KindSingleShard, 2),  // arrives 0.5 s, needs the index: waits for the gpu build
+			q(30*time.Second, 6*time.Second, false, workload.KindSingleShard, 3), // after the DDL
+		}}},
+	}
+	cfg := RoundConfig{Shard: Config{TimeScale: scale, PollInterval: 100 * time.Millisecond, Slice: 20 * time.Millisecond},
+		MinWorkers: 1, WaitWorkers: 5 * time.Second, RoundTimeout: 60 * time.Second}
+	tl, err := RunRound(context.Background(), h.api, w, cfg, h.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("\n%s", tl.Text())
+	s := tl.Shards[0]
+	for _, e := range s.Events {
+		t.Logf("  +%5.2fs %s", e.At.Seconds(), e.Msg)
+	}
+	q0, q1, q2 := s.Queries[0], s.Queries[1], s.Queries[2]
+	if q0.Arrived >= s.Submitted || q0.Finished >= s.Submitted {
+		t.Fatalf("query 0 should have arrived and finished before the DDL (submitted at %s): arrived %s finished %s", s.Submitted, q0.Arrived, q0.Finished)
+	}
+	if q1.Arrived >= s.Submitted || q1.Started < s.BuildDone {
+		t.Fatalf("query 1 arrived before the DDL (%s < %s) but needs the index, so must start after the build finished (%s); started %s", q1.Arrived, s.Submitted, s.BuildDone, q1.Started)
+	}
+	if q2.Arrived < s.Submitted {
+		t.Fatalf("query 2 should arrive after the DDL")
+	}
+	// Recorded run time is exact at this time scale: 6 s modeled / 20 = 300 ms.
+	for _, ql := range s.Queries {
+		run := ql.Finished - ql.Started
+		if run < 290*time.Millisecond || run > 340*time.Millisecond {
+			t.Fatalf("query %d recorded run time %s, want ~300 ms (no HTTP inside the measured interval)", ql.Seq, run)
+		}
+	}
+	t.Logf("pre-DDL queries ran before the submit and were backfilled with their true times; run times %s, %s, %s (modeled 6 s / %g)",
+		(q0.Finished - q0.Started).Round(time.Millisecond), (q1.Finished - q1.Started).Round(time.Millisecond), (q2.Finished - q2.Started).Round(time.Millisecond), scale)
+}

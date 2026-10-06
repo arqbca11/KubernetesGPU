@@ -1,8 +1,8 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-05 00:10:00 PDT
-commit:    27cec0e (uncommitted changes)
+date:      2026-10-05 23:22:54 PDT
+commit:    d1052fe (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-58865, port 24725)
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-85007, port 25202)
 go:        go test -p 1 -count=1 -v ./scheduler/store/
 python:    skipped
 
@@ -113,7 +113,7 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
     store_test.go:546: a leased build is never moved
     store_test.go:552:   [db] build 1:9: placement=gpu state=leased  attempt=1 lease_owner=w lease_expires_in=30s
     store_test.go:556: renege on a leased build -> rejected; attempt is 1, bumped by the claim, untouched by the moves
---- PASS: TestPreemptAndRenegeTransitions (0.02s)
+--- PASS: TestPreemptAndRenegeTransitions (0.01s)
 === RUN   TestSchemaRefusesOrphanShardRows
     store_test.go:563: submitted build 1:10: placement=gpu priority=0 mem=1048576
     store_test.go:564: decision 33 / migration 0004: shard_status and shard_jobs reference builds (round_id, shard_id)
@@ -152,14 +152,27 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
     store_test.go:686: trial 4: 8 simultaneous submits of the same build into a 1-slot round -> inserted=1 noop=7 ErrRoundFull=0
     store_test.go:696: every losing twin was recognised as a duplicate (invariant 6), none was refused as 'round full'
 --- PASS: TestConcurrentDuplicateIntoLastSlotIsNoop (0.04s)
+=== RUN   TestReportBatchIsIdempotentAndFillsIn
+    store_test.go:707: submitted build 0:17: placement=gpu priority=0 mem=1048576
+    store_test.go:712: batch 1: two arrivals, the first already started
+    store_test.go:717: batch 2: the same two records resent (lost reply), plus seq 0 finished and seq 1 started
+    store_test.go:722: batch 3: a stale resend of batch 1 (older view) must not clear what batch 2 filled in
+    store_test.go:728:   [db] seq 0: arrived=0s started=5ms finished=25ms
+    store_test.go:728:   [db] seq 1: arrived=3ms started=26ms finished=<nil>
+    store_test.go:733: timestamps only fill in; a stale resend changed nothing
+    store_test.go:735: final report: stream_done with the last record finished, in the same batch
+    store_test.go:740: a resend of known records after stream_done is fine; a NEW arrival is refused
+    store_test.go:753: a batch for a shard with no build is refused
+    store_test.go:757: the round completes from the batched records like any other
+--- PASS: TestReportBatchIsIdempotentAndFillsIn (0.02s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/store	0.822s
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/store	0.798s
 
-== Docker events for container kgpu-test-pg-58865
-  00:09:59  create
-  00:09:59  start
-  00:10:01  kill
-  00:10:02  die
-  00:10:02  destroy
+== Docker events for container kgpu-test-pg-85007
+  23:22:54  create
+  23:22:54  start
+  23:22:56  kill
+  23:22:56  die
+  23:22:56  destroy
 
 == Result: PASS

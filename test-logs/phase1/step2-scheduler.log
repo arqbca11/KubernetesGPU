@@ -1,8 +1,8 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-04 22:38:20 PDT
-commit:    10f9d16 (uncommitted changes)
+date:      2026-10-05 23:22:58 PDT
+commit:    d1052fe (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-52541, port 26958)
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-85067, port 25580)
 go:        go test -p 1 -count=1 -v ./scheduler/api/ ./scheduler/policy/ ./scheduler/costmodel/
 python:    skipped
 
@@ -13,7 +13,7 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
 === RUN   TestEndToEndRoundOverHTTP
     api_test.go:95: --- a worker with 8 GiB registers by heartbeat (workers use SQL, not HTTP)
     api_test.go:100: GET /workers
-              -> 200 {"pool":{"live_workers":1,"largest_mem_bytes":8589934592},"workers":[{"worker_id":"gpu-1","mem_bytes":8589934592,"last_seen":"2026-10-04T22:38:21.512619-07:00",...
+              -> 200 {"pool":{"live_workers":1,"largest_mem_bytes":8589934592},"workers":[{"worker_id":"gpu-1","mem_bytes":8589934592,"last_seen":"2026-10-05T23:22:59.284112-07:00",...
     api_test.go:105: --- shard simulator starts a round of 2 shards
     api_test.go:107: POST /rounds {"scenario":"test","seed":42,"n_shards":2}
               -> 201 {"round_id":1}
@@ -44,7 +44,7 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
     api_test.go:161: POST /jobs/1/1/0/done
               -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":1}
     api_test.go:164: POST /jobs/1/1/0/done
-              -> 409 {"error":"job cannot be finished: started_at=2026-10-04 22:38:21.532125 -0700 PDT finished_at=2026-10-04 22:38:21.532924 -0700 PDT"}
+              -> 409 {"error":"job cannot be finished: started_at=2026-10-05 23:22:59.304666 -0700 PDT finished_at=2026-10-05 23:22:59.305379 -0700 PDT"}
     api_test.go:168: --- the gpu worker claims and completes shard 1's build (SQL, as the Python worker will)
     api_test.go:177: --- shard 1's next report learns the build is done; query 1 (needs_index) runs; stream exhausted
     api_test.go:113: POST /shards/1/1/report {"queue_depth":1,"waiting_needs_index":1,"oldest_wait_ms":300,"build_progress":0,"stream_done":false}
@@ -72,15 +72,15 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
               -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":2}
     api_test.go:201: --- the round is still open: shard 2 has not said its stream is done
     api_test.go:203: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-04T22:38:21.517071-07:00","finished_at":null},"builds":[{"build_id":"1:1",...
+              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T23:22:59.288793-07:00","finished_at":null},"builds":[{"build_id":"1:1",...
     api_test.go:113: POST /shards/1/2/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
               -> 200 {"build":{"build_id":"2:1","placement":"local","state":"done","attempt":0}}
     api_test.go:209: --- the reaper tick (or a GET) stamps the round finished
     api_test.go:211: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-04T22:38:21.517071-07:00","finished_at":"2026-10-04T22:38:21.543415-07:00"...
+              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T23:22:59.288793-07:00","finished_at":"2026-10-05T23:22:59.316231-07:00"...
     api_test.go:219:     build 1:1: gpu/done attempt 1
     api_test.go:219:     build 2:1: local/done attempt 0
-    api_test.go:224:     round 1 finished; duration 26ms
+    api_test.go:224:     round 1 finished; duration 27ms
 --- PASS: TestEndToEndRoundOverHTTP (0.08s)
 === RUN   TestReportReflectsPreemption
     api_test.go:231: POST /rounds {"scenario":"test","seed":1,"n_shards":1}
@@ -146,12 +146,36 @@ Lines tagged [db] are the build row as Postgres had it at that moment.
     api_test.go:332: POST /shards/3/42/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
               -> 200 {"build":{"build_id":"42:3","placement":"gpu","state":"done","attempt":1}}
     api_test.go:335: GET /rounds/3
-              -> 200 {"round":{"round_id":3,"scenario":"test","seed":1,"n_shards":2,"started_at":"2026-10-04T22:38:21.584812-07:00","finished_at":"2026-10-04T22:38:21.596235-07:00"}...
+              -> 200 {"round":{"round_id":3,"scenario":"test","seed":1,"n_shards":2,"started_at":"2026-10-05T23:22:59.357386-07:00","finished_at":"2026-10-05T23:22:59.367447-07:00"}...
     api_test.go:339: POST /builds {"round_id":3,"shard_id":42,"n_vectors":10,"dim":4}
               -> 200 {"build_id":"42:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":320,"created":false,"cpu_build_ms":0,"gpu_...
 --- PASS: TestSubmitValidationAgainstRound (0.02s)
+=== RUN   TestReportWithJobBatch
+    api_test.go:349: POST /rounds {"scenario":"test","seed":1,"n_shards":1}
+              -> 201 {"round_id":4}
+    api_test.go:351: POST /builds {"round_id":4,"shard_id":0,"n_vectors":1000,"dim":4}
+              -> 201 {"build_id":"0:4","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":32000,"created":true,"cpu_build_ms":3,"gpu_total_ms":2001}
+    api_test.go:356: --- a report with two records, one finished
+    api_test.go:358: POST /shards/4/0/report {"queue_depth":1,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":0,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.385358-07:00","started_at":"2026-10-05T23:22:54.386358-07:00","finished_at":"2026-10-05T23:22:54.396358-07:00"},{"seq":1,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.387358-07:00","started_at":null,"finished_at":null}]}
+              -> 200 {"build":{"build_id":"0:4","placement":"gpu","state":"queued","attempt":0}}
+    api_test.go:366: GET /rounds/4
+              -> 200 {"round":{"round_id":4,"scenario":"test","seed":1,"n_shards":1,"started_at":"2026-10-05T23:22:59.380403-07:00","finished_at":null},"builds":[{"build_id":"0:4","...
+    api_test.go:370:     both recorded with the shard's timestamps; the reply still carries the build
+    api_test.go:372: --- bad batches are 400
+    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"0001-01-01T00:00:00Z","started_at":null,"finished_at":null}]}
+              -> 400 {"error":"jobs[0]: seq and duration_ms must be non-negative and arrived_at set"}
+    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.395358-07:00","started_at":"2026-10-05T23:22:54.390358-07:00","finished_at":null}]}
+              -> 400 {"error":"jobs[0]: started_at before arrived_at"}
+    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.395358-07:00","started_at":null,"finished_at":"2026-10-05T23:22:54.405358-07:00"}]}
+              -> 400 {"error":"jobs[0]: finished_at without started_at or before it"}
+    api_test.go:382: --- stream_done with the last record; then a new arrival is 409
+    api_test.go:383: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true,"jobs":[{"seq":1,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.387358-07:00","started_at":"2026-10-05T23:22:54.397358-07:00","finished_at":"2026-10-05T23:22:54.407358-07:00"}]}
+              -> 200 {"build":{"build_id":"0:4","placement":"gpu","state":"queued","attempt":0}}
+    api_test.go:386: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true,"jobs":[{"seq":2,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.415358-07:00","started_at":null,"finished_at":null}]}
+              -> 409 {"error":"batch brings new arrivals after stream_done"}
+--- PASS: TestReportWithJobBatch (0.02s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.428s
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.452s
 === RUN   TestAlwaysGPU
     policy_test.go:19: fits                                          -> gpu   (always_gpu)
     policy_test.go:19: exactly fits                                  -> gpu   (always_gpu)
@@ -159,7 +183,7 @@ ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.428s
     policy_test.go:19: no live workers: still queue (pool may be cold) -> gpu   (always_gpu)
 --- PASS: TestAlwaysGPU (0.00s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/policy	0.284s
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/policy	0.268s
 === RUN   TestDefaultsAreInTheIntendedRange
     costmodel_test.go:12: 100k x 128: cpu=20.631162433s gpu(total incl. transfer)=4.639116243s mem=97 MiB
     costmodel_test.go:21: 1k x 128: cpu=123.786974ms gpu=2.018138697s
@@ -167,13 +191,13 @@ ok  	github.com/arqbca11/KubernetesGPU/scheduler/policy	0.284s
 === RUN   TestMonotonicInSize
 --- PASS: TestMonotonicInSize (0.00s)
 PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/costmodel	0.225s
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/costmodel	0.327s
 
-== Docker events for container kgpu-test-pg-52541
-  22:38:19  create
-  22:38:20  start
-  22:38:22  kill
-  22:38:22  die
-  22:38:22  destroy
+== Docker events for container kgpu-test-pg-85067
+  23:22:57  create
+  23:22:57  start
+  23:23:00  kill
+  23:23:00  die
+  23:23:00  destroy
 
 == Result: PASS

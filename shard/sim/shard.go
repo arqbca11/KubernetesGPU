@@ -8,6 +8,13 @@
 //
 // Every modeled duration (build time, query duration, arrival offset) is
 // divided by Config.TimeScale, the same knob as the worker's FAKE_TIME_SCALE.
+//
+// Query records are batched (decision 60): the shard keeps each query's
+// arrival, start and finish on its own clock and sends the records that
+// changed since the last report inside the report, once per poll interval.
+// Nothing about a query goes over HTTP while it runs, so recorded durations
+// are exact at any time scale, and queries that arrive before the shard's DDL
+// are run and backfilled once the build exists (decision 59).
 package sim
 
 import (
@@ -41,9 +48,17 @@ type Event struct {
 }
 
 type queued struct {
-	seq     int32
-	q       workload.Query
-	arrived time.Time
+	seq      int32
+	q        workload.Query
+	arrived  time.Time
+	started  *time.Time
+	finished *time.Time
+}
+
+// record is the batch form of a queued item (a snapshot of its timestamps).
+func (it *queued) record() client.JobRecord {
+	return client.JobRecord{Seq: it.seq, DurationMs: it.q.Duration.Milliseconds(), NeedsIndex: it.q.NeedsIndex,
+		ArrivedAt: it.arrived, StartedAt: it.started, FinishedAt: it.finished}
 }
 
 type buildState struct {
@@ -51,6 +66,7 @@ type buildState struct {
 	placement  string
 	state      string
 	attempt    int32
+	deciding   bool          // the DDL has arrived and the placement is not known yet: the CPU runs no queries (decision 64)
 	cpuBuild   time.Duration // scaled local build duration
 	localWant  bool          // the scheduler says: build locally, and we have not started
 	localBusy  bool          // the CPU goroutine is building right now
@@ -73,6 +89,8 @@ type Shard struct {
 	b          buildState
 	queue      []*queued
 	nextSeq    int32
+	dirty      []*queued // records changed since the last report (arrived, started or finished)
+	submitted  bool      // the build exists at the scheduler; reports may begin
 	streamDone bool
 	events     []Event
 	finished   bool
@@ -100,78 +118,83 @@ func (s *Shard) event(f string, a ...any) {
 // the queue is empty. Returns when the final stream_done report is accepted.
 func (s *Shard) Run(ctx context.Context, start time.Time) error {
 	s.start = start
-	if d := s.cfg.scale(s.w.DDLOffset); d > 0 {
-		select {
-		case <-time.After(time.Until(start.Add(d))):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	resp, err := s.api.Submit(ctx, client.SubmitBuildRequest{RoundID: s.round, ShardID: s.w.ShardID, NVectors: s.w.NVectors, Dim: s.dim})
-	if err != nil {
-		return fmt.Errorf("submit: %w", err)
-	}
-	s.mu.Lock()
-	s.b = buildState{id: resp.BuildID, placement: resp.Placement, cpuBuild: s.cfg.scale(time.Duration(resp.CPUBuildMs) * time.Millisecond)}
-	if resp.Placement == "local" {
-		s.b.state, s.b.localWant = "running", true
-	} else {
-		s.b.state = "queued"
-	}
-	s.event("submitted: placement=%s (%s); cpu_build=%s gpu_total=%s (modeled)", resp.Placement, resp.Reason,
-		time.Duration(resp.CPUBuildMs)*time.Millisecond, time.Duration(resp.GPUTotalMs)*time.Millisecond)
-	s.mu.Unlock()
-	s.log.Info("submitted", "placement", resp.Placement, "reason", resp.Reason, "n_vectors", s.w.NVectors, "attempt", 0)
-
+	s.b.id = fmt.Sprintf("%d:%d", s.w.ShardID, s.round)
+	// Queries start arriving and running at round start; the build is submitted
+	// at the shard's DDL offset (decision 59), and reports begin after that.
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); s.arrivals(ctx) }()
 	go func() { defer wg.Done(); s.cpu(ctx) }()
-	go func() { defer wg.Done(); s.reports(ctx) }()
+	go func() {
+		defer wg.Done()
+		if err := s.submitAtDDL(ctx); err != nil {
+			s.fail(err)
+			return
+		}
+		s.reports(ctx)
+	}()
 	wg.Wait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
 }
 
+func (s *Shard) submitAtDDL(ctx context.Context) error {
+	if d := s.cfg.scale(s.w.DDLOffset); d > 0 {
+		select {
+		case <-time.After(time.Until(s.start.Add(d))):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// The DDL has arrived: the CPU is held until the placement is known, as
+	// DML is blocked while a DDL is processed (decision 64).
+	s.mu.Lock()
+	s.b.deciding = true
+	s.event("DDL received: submitting; the CPU runs no queries until the placement is known")
+	s.mu.Unlock()
+	resp, err := s.api.Submit(ctx, client.SubmitBuildRequest{RoundID: s.round, ShardID: s.w.ShardID, NVectors: s.w.NVectors, Dim: s.dim})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.deciding = false
+	if err != nil {
+		return fmt.Errorf("submit: %w", err)
+	}
+	s.b.placement = resp.Placement
+	s.b.cpuBuild = s.cfg.scale(time.Duration(resp.CPUBuildMs) * time.Millisecond)
+	if resp.Placement == "local" {
+		s.b.state, s.b.localWant = "running", true
+	} else {
+		s.b.state = "queued"
+	}
+	s.submitted = true
+	pre := len(s.dirty)
+	s.event("submitted: placement=%s (%s); cpu_build=%s gpu_total=%s (modeled); %d query records from before the DDL to backfill",
+		resp.Placement, resp.Reason, time.Duration(resp.CPUBuildMs)*time.Millisecond, time.Duration(resp.GPUTotalMs)*time.Millisecond, pre)
+	s.log.Info("submitted", "placement", resp.Placement, "reason", resp.Reason, "n_vectors", s.w.NVectors, "attempt", 0, "pre_ddl_records", pre)
+	return nil
+}
+
 // ---- arrivals ------------------------------------------------------------------
 
 func (s *Shard) arrivals(ctx context.Context) {
-	// Queries that arrive before this shard's DDL belong to the pre-DDL steady
-	// state. Phase 1 drops them (the scheduler does not know the shard yet, so
-	// it would refuse the arrival); the staggered scenario in Phase 3 needs a
-	// better answer (open question in the design doc).
-	skipped := 0
 	for _, q := range s.w.Queries {
-		if q.Arrival < s.w.DDLOffset {
-			skipped++
-			continue
-		}
 		at := s.start.Add(s.cfg.scale(q.Arrival))
 		select {
 		case <-time.After(time.Until(at)):
 		case <-ctx.Done():
 			return
 		}
-		// Record the arrival with the scheduler BEFORE making the query runnable:
-		// otherwise the CPU goroutine can start it and hit "no such job".
 		s.mu.Lock()
-		seq := s.nextSeq
+		item := &queued{seq: s.nextSeq, q: q, arrived: time.Now()}
 		s.nextSeq++
-		s.mu.Unlock()
-		arrived := time.Now()
-		if err := s.api.Arrival(ctx, s.round, s.w.ShardID, client.ArrivalRequest{
-			Seq: seq, DurationMs: q.Duration.Milliseconds(), NeedsIndex: q.NeedsIndex}); err != nil {
-			s.fail(fmt.Errorf("record arrival seq %d: %w", seq, err))
-			return
-		}
-		s.mu.Lock()
-		s.queue = append(s.queue, &queued{seq: seq, q: q, arrived: arrived})
+		s.queue = append(s.queue, item)
+		s.dirty = append(s.dirty, item) // reported in the next batch
 		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	s.streamDone = true
-	s.event("stream exhausted: %d queries arrived (%d before the DDL were not replayed)", len(s.w.Queries)-skipped, skipped)
+	s.event("stream exhausted: %d queries arrived", len(s.w.Queries))
 	s.mu.Unlock()
 }
 
@@ -198,9 +221,12 @@ func (s *Shard) cpu(ctx context.Context) {
 			s.runLocalBuild(ctx, dur)
 			continue
 		}
-		idx := s.nextReady()
+		idx := -1
+		if !s.b.deciding {
+			idx = s.nextReady()
+		}
 		if idx < 0 {
-			done := s.streamDone && len(s.queue) == 0 && (s.b.indexReady || s.b.failed || s.b.state == "done")
+			done := s.submitted && s.streamDone && len(s.queue) == 0 && (s.b.indexReady || s.b.failed || s.b.state == "done")
 			if done && !s.b.localBusy {
 				s.finished = true
 				s.event("shard done: build %s, stream exhausted, queue empty", s.b.state)
@@ -228,23 +254,25 @@ func (s *Shard) nextReady() int {
 	return -1
 }
 
+// runQuery occupies the CPU for the query's scaled duration. Timestamps are
+// taken locally and reported in the next batch; no HTTP on this path.
 func (s *Shard) runQuery(ctx context.Context, item *queued) {
-	if err := s.api.JobStart(ctx, s.round, s.w.ShardID, item.seq); err != nil {
-		s.fail(fmt.Errorf("job %d start: %w", item.seq, err))
-		return
-	}
+	now := time.Now()
+	s.mu.Lock()
+	item.started = &now
+	s.dirty = append(s.dirty, item)
+	s.mu.Unlock()
 	select {
 	case <-time.After(s.cfg.scale(item.q.Duration)):
 	case <-ctx.Done():
 		return
 	}
-	if err := s.api.JobDone(ctx, s.round, s.w.ShardID, item.seq); err != nil {
-		s.fail(fmt.Errorf("job %d done: %w", item.seq, err))
-		return
-	}
+	end := time.Now()
 	s.mu.Lock()
+	item.finished = &end
+	s.dirty = append(s.dirty, item)
 	s.event("query %d done: %s %s waited %s", item.seq, item.q.Kind, map[bool]string{true: "needs_index", false: ""}[item.q.NeedsIndex],
-		time.Since(item.arrived).Round(time.Millisecond))
+		item.started.Sub(item.arrived).Round(time.Millisecond))
 	s.mu.Unlock()
 }
 
@@ -320,6 +348,7 @@ func (s *Shard) reports(ctx context.Context) {
 		}
 		fin := s.finished
 		req := s.reportLocked()
+		req.Jobs = s.drainDirtyLocked()
 		s.mu.Unlock()
 		if fin && sentFinal {
 			return
@@ -329,7 +358,7 @@ func (s *Shard) reports(ctx context.Context) {
 			s.fail(fmt.Errorf("report: %w", err))
 			return
 		}
-		if fin && req.StreamDone && req.QueueDepth == 0 {
+		if fin && req.StreamDone && req.QueueDepth == 0 && len(req.Jobs) == 0 {
 			sentFinal = true
 		}
 		s.apply(summary)
@@ -342,6 +371,27 @@ func (s *Shard) reports(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// drainDirtyLocked snapshots the records that changed since the last report,
+// deduplicated by seq (an item may have arrived, started and finished since).
+// Caller holds mu. The snapshot copies timestamps, so later changes are
+// reported in a later batch and a resend is always safe (COALESCE upsert).
+func (s *Shard) drainDirtyLocked() []client.JobRecord {
+	if len(s.dirty) == 0 {
+		return nil
+	}
+	seen := map[int32]bool{}
+	var out []client.JobRecord
+	for _, it := range s.dirty {
+		if seen[it.seq] {
+			continue
+		}
+		seen[it.seq] = true
+		out = append(out, it.record())
+	}
+	s.dirty = s.dirty[:0]
+	return out
 }
 
 // reportLocked builds the load report from the current state. Caller holds mu.

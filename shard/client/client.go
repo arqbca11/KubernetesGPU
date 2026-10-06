@@ -69,12 +69,24 @@ type ArrivalRequest struct {
 	NeedsIndex bool  `json:"needs_index"`
 }
 
+// JobRecord is one query as reported in a batch (decision 60); timestamps
+// are the shard's clock. StartedAt/FinishedAt are nil until they happen.
+type JobRecord struct {
+	Seq        int32      `json:"seq"`
+	DurationMs int64      `json:"duration_ms"`
+	NeedsIndex bool       `json:"needs_index"`
+	ArrivedAt  time.Time  `json:"arrived_at"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
 type ReportRequest struct {
-	QueueDepth        int32   `json:"queue_depth"`
-	WaitingNeedsIndex int32   `json:"waiting_needs_index"`
-	OldestWaitMs      int64   `json:"oldest_wait_ms"`
-	BuildProgress     float32 `json:"build_progress"`
-	StreamDone        bool    `json:"stream_done"`
+	QueueDepth        int32       `json:"queue_depth"`
+	WaitingNeedsIndex int32       `json:"waiting_needs_index"`
+	OldestWaitMs      int64       `json:"oldest_wait_ms"`
+	BuildProgress     float32     `json:"build_progress"`
+	StreamDone        bool        `json:"stream_done"`
+	Jobs              []JobRecord `json:"jobs,omitempty"`
 }
 
 type BuildSummary struct {

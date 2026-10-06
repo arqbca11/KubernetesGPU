@@ -340,3 +340,50 @@ func TestSubmitValidationAgainstRound(t *testing.T) {
 		t.Fatalf("duplicate into a finished round: got %d want 200", code)
 	}
 }
+
+// Decision 60 over HTTP: the report carries a batch of client-timestamped
+// query records; bad batches are 400; a new arrival after stream_done is 409.
+func TestReportWithJobBatch(t *testing.T) {
+	h := newHarness(t)
+	var cr CreateRoundResponse
+	h.call("POST", "/rounds", CreateRoundRequest{Scenario: "test", Seed: 1, NShards: 1}, &cr)
+	r := cr.RoundID
+	h.call("POST", "/builds", SubmitBuildRequest{RoundID: r, ShardID: 0, NVectors: 1000, Dim: 4}, nil)
+	t0 := time.Now().Add(-5 * time.Second)
+	at := func(ms int) *time.Time { x := t0.Add(time.Duration(ms) * time.Millisecond); return &x }
+	path := fmt.Sprintf("/shards/%d/0/report", r)
+
+	t.Log("--- a report with two records, one finished")
+	var rr ReportResponse
+	code := h.call("POST", path, ReportRequest{QueueDepth: 1, Jobs: []store.JobRecord{
+		{Seq: 0, DurationMs: 10, ArrivedAt: *at(0), StartedAt: at(1), FinishedAt: at(11)},
+		{Seq: 1, DurationMs: 10, ArrivedAt: *at(2)},
+	}}, &rr)
+	if code != 200 || rr.Build.State != "queued" {
+		t.Fatalf("batch report: %d %+v", code, rr)
+	}
+	var rs RoundStatus
+	h.call("GET", fmt.Sprintf("/rounds/%d", r), nil, &rs)
+	if len(rs.Jobs) != 2 || rs.Jobs[0].FinishedAt == nil || rs.Jobs[0].ArrivedAt.Sub(t0) != 0 {
+		t.Fatalf("jobs: %+v", rs.Jobs)
+	}
+	t.Log("    both recorded with the shard's timestamps; the reply still carries the build")
+
+	t.Log("--- bad batches are 400")
+	for _, bad := range []store.JobRecord{
+		{Seq: 5, DurationMs: 10}, // no arrived_at
+		{Seq: 5, DurationMs: 10, ArrivedAt: *at(10), StartedAt: at(5)},   // started before arrived
+		{Seq: 5, DurationMs: 10, ArrivedAt: *at(10), FinishedAt: at(20)}, // finished without started
+	} {
+		if code := h.call("POST", path, ReportRequest{Jobs: []store.JobRecord{bad}}, nil); code != 400 {
+			t.Fatalf("bad record %+v: got %d", bad, code)
+		}
+	}
+	t.Log("--- stream_done with the last record; then a new arrival is 409")
+	if code := h.call("POST", path, ReportRequest{StreamDone: true, Jobs: []store.JobRecord{{Seq: 1, DurationMs: 10, ArrivedAt: *at(2), StartedAt: at(12), FinishedAt: at(22)}}}, nil); code != 200 {
+		t.Fatalf("final batch: %d", code)
+	}
+	if code := h.call("POST", path, ReportRequest{StreamDone: true, Jobs: []store.JobRecord{{Seq: 2, DurationMs: 10, ArrivedAt: *at(30)}}}, nil); code != 409 {
+		t.Fatalf("arrival after stream_done: got %d want 409", code)
+	}
+}

@@ -695,3 +695,77 @@ func TestConcurrentDuplicateIntoLastSlotIsNoop(t *testing.T) {
 	}
 	t.Log("every losing twin was recognised as a duplicate (invariant 6), none was refused as 'round full'")
 }
+
+// Decision 60: a shard reports its query records in batches with its own
+// timestamps. The batch is one transaction, idempotent on resend, fills in
+// timestamps without ever changing one already set, and refuses new arrivals
+// after stream_done.
+func TestReportBatchIsIdempotentAndFillsIn(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	r, _ := s.CreateRound(ctx, "test", 1, 1)
+	submit(t, s, r, 0, "gpu", 0, 1<<20)
+	t0 := time.Now().Add(-10 * time.Second)
+	at := func(ms int) *time.Time { x := t0.Add(time.Duration(ms) * time.Millisecond); return &x }
+	st := ShardStatus{RoundID: r, ShardID: 0, QueueDepth: 2}
+
+	t.Log("batch 1: two arrivals, the first already started")
+	b1 := []JobRecord{{Seq: 0, DurationMs: 20, ArrivedAt: *at(0), StartedAt: at(5)}, {Seq: 1, DurationMs: 30, NeedsIndex: true, ArrivedAt: *at(3)}}
+	if err := s.ReportBatch(ctx, st, b1); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("batch 2: the same two records resent (lost reply), plus seq 0 finished and seq 1 started")
+	b2 := []JobRecord{{Seq: 0, DurationMs: 20, ArrivedAt: *at(0), StartedAt: at(5), FinishedAt: at(25)}, {Seq: 1, DurationMs: 30, NeedsIndex: true, ArrivedAt: *at(3), StartedAt: at(26)}}
+	if err := s.ReportBatch(ctx, st, b2); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("batch 3: a stale resend of batch 1 (older view) must not clear what batch 2 filled in")
+	if err := s.ReportBatch(ctx, st, b1); err != nil {
+		t.Fatal(err)
+	}
+	jobs, _ := s.ListJobs(ctx, r)
+	for _, j := range jobs {
+		t.Logf("  [db] seq %d: arrived=%s started=%v finished=%v", j.Seq, j.ArrivedAt.Sub(t0), tsub(j.StartedAt, t0), tsub(j.FinishedAt, t0))
+	}
+	if len(jobs) != 2 || jobs[0].FinishedAt == nil || jobs[1].StartedAt == nil || jobs[0].StartedAt.Sub(t0) != 5*time.Millisecond {
+		t.Fatalf("batch upsert wrong: %+v", jobs)
+	}
+	t.Log("timestamps only fill in; a stale resend changed nothing")
+
+	t.Log("final report: stream_done with the last record finished, in the same batch")
+	b4 := []JobRecord{{Seq: 1, DurationMs: 30, NeedsIndex: true, ArrivedAt: *at(3), StartedAt: at(26), FinishedAt: at(56)}}
+	if err := s.ReportBatch(ctx, st2(st, true), b4); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("a resend of known records after stream_done is fine; a NEW arrival is refused")
+	if err := s.ReportBatch(ctx, st2(st, true), b4); err != nil {
+		t.Fatalf("resend after stream_done: %v", err)
+	}
+	err := s.ReportBatch(ctx, st2(st, true), []JobRecord{{Seq: 2, DurationMs: 1, ArrivedAt: *at(60)}})
+	if !errors.Is(err, ErrStreamDone) {
+		t.Fatalf("new arrival after stream_done: got %v, want ErrStreamDone", err)
+	}
+	var n int
+	pool.QueryRow(ctx, `SELECT COUNT(*) FROM shard_jobs WHERE round_id = $1`, r).Scan(&n) //nolint:errcheck
+	if n != 2 {
+		t.Fatalf("the refused batch must write nothing; %d rows", n)
+	}
+	t.Log("a batch for a shard with no build is refused")
+	if err := s.ReportBatch(ctx, ShardStatus{RoundID: r, ShardID: 7}, b1); !errors.Is(err, ErrNoBuild) {
+		t.Fatalf("got %v, want ErrNoBuild", err)
+	}
+	t.Log("the round completes from the batched records like any other")
+	c, _, _ := s.Claim(ctx, "w", 1<<30, lease)
+	s.Complete(ctx, c.BuildID, c.Attempt) //nolint:errcheck
+	if k, _ := s.FinishCompleteRounds(ctx); k != 1 {
+		t.Fatal("round did not finish")
+	}
+}
+
+func st2(st ShardStatus, done bool) ShardStatus { st.StreamDone = done; st.QueueDepth = 0; return st }
+func tsub(t *time.Time, t0 time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.Sub(t0)
+}
