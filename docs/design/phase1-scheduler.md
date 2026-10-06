@@ -314,6 +314,39 @@ Tests added: `costmodel` (range and monotonicity), `policy` (the four placement 
 
 Tests revised or added: store `RoundFinishesOnlyWhenEveryShardIsDone` (now walks arrivals, reports and the `stream_done` gate) and `PreemptAndRenegeTransitions` (decision 31, including that a leased build is never moved and a preempted shard's `done` is refused); api `EndToEndRoundOverHTTP` (arrivals, reports, the reply carrying the build's state, the round staying open until `stream_done`) and `ReportReflectsPreemption` (the shard learns of a preemption from its report reply). The old-spec cross-check tests were removed and the cross-check rerun against the revised spec; see below.
 
+### Cross-check of steps 1 and 2, first run (2026-10-02, before the model revision)
+
+An independent agent (`.claude/agents/crosscheck-tester.md`, Opus, fresh context) wrote 14 black-box tests in `scheduler/crosscheck/` from the spec alone, without reading the implementation. 13 passed. The one failure and the gaps it reported, with what was done:
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** A duplicate `POST /builds` returned `cpu_build_ms` and `gpu_total_ms` computed from the repeat's request body while `mem_bytes` came from the stored row. A shard retrying with a different body would sleep for the wrong time. | Fixed: all estimates on a duplicate come from the stored row. The cross-check test now passes. |
+| Which columns reap and release clear was unspecified; clearing `started_at` loses the first attempt's start. | Decision 24. |
+| `Renew` succeeds on an expired-but-unreaped lease. | Intended; decision 25. |
+| A failed GPU build leaves a `needs_index` job that can never start, so the round never finishes. | Open question below; fake builds cannot fail, so this is decided when real failures arrive (Phase 4). |
+| `shard_id` not validated against `n_shards`; submits to a finished round accepted. | Fixed with a per-round cap rather than an id range; decision 27. |
+| Job endpoints returned 409 for a nonexistent job. | Now 404; API table updated. |
+| "Fits" boundary, heartbeat capacity change, concurrent duplicate submits unspecified. | Decision 26. |
+| `reason` on a duplicate is not the original reason. | Not stored; the doc comment and API table now say so. |
+| Stale duplicate API table in this doc. | Removed. |
+
+Smoke test of the real binary: started before Postgres was ready (connect retry observed), migrated both files, answered `/healthz`, created a round, placed a build on the GPU queue with zero live workers (decision 19), and shut down cleanly on SIGTERM.
+
+### Cross-check of steps 1 and 2, second run (2026-10-02, against the revised spec)
+
+A fresh agent wrote 16 tests from the revised spec. 12 passed, 4 failed. Findings and what was done:
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug, serious.** Twelve concurrent submits into a round with `n_shards = 3` all succeeded, over HTTP and through the store. The cap held only for sequential submits. Cause: the build count was a subquery inside the `SELECT … FOR UPDATE` statement. Under READ COMMITTED a statement's snapshot is taken when it starts, before it blocks on the lock, so the waiter counted zero builds even after the winner committed. | Fixed: lock in one statement, count in the next (fresh snapshot). The agent's two concurrency tests now pass. |
+| **Bug.** A `stream_done` report from a shard with no build (reachable through the store, not HTTP) completed a round while a real shard was still streaming. | Fixed; decision 33. The agent's test was updated to the stricter resolution (the report is refused, not ignored). |
+| **Spec disagreement.** Preempt reset `enqueued_at` to now; decisions 24 and 31 say it keeps the submit time. | Fixed: preempt no longer touches `enqueued_at`; decision 31 reworded. |
+| Arrival validation unspecified (unknown round, no build, after `stream_done`, finished round). | 404 / 404 / 409; decision 33; API table. A finished round has every shard `stream_done`, so the last case is covered by the 409. |
+| `stream_done` could be withdrawn by a later report. | Sticky; decision 33. |
+| Renege sets `started_at`; 400 for an invalid report and 200 for start/done not in the API table; unknown round on report shares the 404. | Documented in decision 31 and the API table. |
+| `ErrRoundFinished` is unreachable on its own. | True; kept as a defensive guard and noted in the store doc. |
+| Stale "follow-up job" wording in the store package. | Fixed. |
+
 ### Step 3: Python worker (done 2026-10-04)
 
 | Path | What |
@@ -368,6 +401,17 @@ Log vocabulary (the `msg` field; tests may match on these):
 
 **Smoke test with real processes (2026-10-04).** Postgres in a container, the Go scheduler binary with a 1 s reap interval, two Python worker processes with a 3 s lease, 1 s renew, 10x time scale. A 2M-vector build (65 s modeled, 6.5 s scaled) was submitted. Worker A claimed it (attempt 1) and was `kill -9`'d after 2 s. The scheduler logged `lease expired, build back to queued … attempt=1 lease_owner=gpu-A`; worker B claimed attempt 2 and completed it; the final row was `done`, attempt 2, 9.8 s after the kill (3 s lease plus 6.5 s build). Then a second build: worker B claimed it, received SIGTERM 1 s in with 5.4 s remaining against a 5 s budget, cancelled at 19%, released it (`queued`, attempt 1, no owner), and exited 0. This is the phase's done-when condition, shown by hand at the process level; step 4 repeats it under Compose and step 6 under the shard simulator.
 
+### Cross-check of step 3, the worker (2026-10-04)
+
+A fresh agent wrote 11 Go tests that run the real worker process (`python -m kgpu_worker`) as a subprocess, configure it only through its documented environment variables, and observe Postgres and the worker's log. 9 passed, 2 failed. Among the passes: `kill -9` mid-build with a second worker completing attempt 2 exactly once; SIGSTOP past the lease, SIGCONT, and the row byte-for-byte unchanged a full build time later; a reclaimed build cancelled within one renew interval; both SIGTERM branches.
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** The first heartbeat raced the first claim: the claim's `started_at` was 3 to 6 ms before the worker's `registered_at`, so pool state could miss a worker that was already busy. | The first heartbeat is synchronous, before the loop starts. Python test `registers_before_first_claim`. |
+| **Bug, serious.** `COST_BANDWIDTH=0`, a documented override, made the builder's arithmetic raise after the claim; the process died with exit 1 and the row stayed `leased`. The reaper would requeue it and the next worker would crash the same way: a poison pill. | Decisions 39 and 41. Bug log 5. The agent's test became two: bad config is refused at startup with exit 2 and no claim; a build error via `FAKE_FAIL_BUILD_IDS` ends in `failed` with the reason and the worker lives on. |
+| No way to fail a fake build. | Decision 40, `FAKE_FAIL_BUILD_IDS`. |
+| After a lost lease, does the worker keep claiming? Budget units? SIGTERM while idle or during a claim? Which stream? Log message names? `RENEW >= LEASE`? | All stated in the behaviour paragraph, the config table, the log vocabulary table, and decision 39. |
+
 ### Step 4: Docker Compose (done 2026-10-05)
 
 | Path | What |
@@ -388,6 +432,17 @@ What the script does and what it showed (2026-10-05 run):
 | 6 | Resubmit the finished build with a different body | 200, `created:false`, the stored decision. Roadmap failure test 4. |
 
 All four roadmap failure tests pass on the Compose stack. Step 6 repeats them with the shard simulator generating the load, and step 7 at 50 shards.
+
+### Cross-check of step 4, the Compose stack (2026-10-05)
+
+A fresh agent wrote 9 Go tests (10 cases) that bring up their own copy of the stack under project `kgpu-xcheck` and drive it only through the API and the `docker` CLI. 7 cases passed, 3 failed. Passing cases of note: `docker stop` on a leaseholder with a long remainder released the build and another worker re-claimed it within 0.4 s, before the lease would have expired; with a short remainder the build was finished before exit; a lease that expired while the scheduler was *stopped* was reaped exactly once by the next scheduler; `--scale worker=3` gave three simultaneous leases by three distinct owners.
+
+| Finding | Resolution |
+| --- | --- |
+| **Bug.** Eight simultaneous submits of one build into a round's last slot: one 201, seven 409 "round full" instead of 200 `created:false`. | Bug log 6, commit `422d722`: the duplicate check moved after the round lock, like the count. Store test with five trials. |
+| **Bug.** `docker compose restart postgres` crashed both workers with tracebacks; the build was still recovered by the reaper as attempt 2. | Bug log 7, decision 48: reconnect while idle, retry guarded writes until the lease deadline, errored renews are not rejections. Python test kills every backend connection mid-build with `pg_terminate_backend`; the worker keeps its lease and completes attempt 1. |
+| **Spec was wrong.** The agent's kill test asserted that `docker kill` is followed by a restart, as decision 47 and the step 4 table then claimed. It is not: Docker treats `docker kill` as a manual stop. | The implementer had found the same thing hours earlier (see decision 47); the agent's test was updated to crash the worker's own process from inside the container, which the restart policy does recover. Both findings agree. |
+| Budget vs grace period; releases counted as lost; no deregistration on clean exit; `WORKER_ID` reused across restarts; errored vs rejected renew; reap timing bound. | Decisions 48 to 50. |
 
 ### Step 5: shard simulator and workload generator (done 2026-10-05)
 
@@ -415,6 +470,18 @@ Details the cross-check asked to have stated: `seq` is 0-based and counts record
 6. Should index-needing queries cost more CPU than others?
 7. `math/rand/v2`'s derived methods are not promised stable across Go releases; store generated workloads as JSON alongside results, not only the seed.
 8. ~~Capacity at 50 shards~~ Decided: batched, client-timestamped reporting, decision 60, implemented in step 7.
+
+### Cross-check of step 5, the shard simulator (2026-10-05)
+
+A fresh agent ran the real `shardsim` binary against an in-process scheduler (`httptest`), a reaper loop and a fake GPU worker it played itself, observing only through Postgres, the binary's stdout and its timeline JSON. 9 tests, all passed: determinism of the replayed workload across processes; every query recorded once, in order, and finished, with one CPU per shard and builds done at attempt 1; `needs_index` queries never start before the build finishes while independent ones run; a local build occupies the CPU for exactly its scaled time; reports every poll interval with sticky `stream_done`; a preemption honoured within 100 ms with the independent queries draining on the freed CPU; SIGTERM exits in milliseconds; a bad scenario exits 2 with no traffic; the timeline JSON matches Postgres field for field across two mixed-placement rounds.
+
+| Finding | Resolution |
+| --- | --- |
+| `POLL_INTERVAL=0s` accepted: 746 requests in 3 s, then the round timed out. | Decision 57: validation at startup. |
+| SIGTERM mid-round exits 0 silently and leaves the round open with `finished_at` NULL. | Decision 57: a warning names the open round. No "abandoned" state exists; recorded as an open question. |
+| Query run times inflated 1.6 to 1.8x at a time scale of 20 by the bracketing HTTP calls. | Documented above as a fidelity bound; batched client-timestamped reporting (step 7) removes it. |
+| `seq` semantics, local `attempt 0`, preemption reaction time unstated. | Stated above. |
+| Pre-DDL dropping never exercised in a live round. | True; staggered is Phase 3's scenario (open question 4). |
 
 ### Step 6: the failure tests under simulator load (done 2026-10-05)
 
@@ -445,73 +512,6 @@ A fresh agent brought up its own stack with the simulator running continuous rou
 | At stamp time one or two shards' `shard_status` still showed a small backlog; the next report zeroed it. | Decision 62: the report may lag the stamp by one interval; completion never reads it. |
 | The shard log showed `leased` then `leased` when a reap and re-claim fell between two reports; only the timeline's attempt column recorded the recovery. | The shard now logs and records an event on an attempt change (decision 62). |
 | Unstated: with a 5 s budget and 3.8 s builds the `docker stop` release path cannot run; the scheduler survives a Postgres restart (it does, via its connection pool); a shard need not observe `queued` during a sub-interval reap window. | Noted here. |
-
-### Cross-check of step 5, the shard simulator (2026-10-05)
-
-A fresh agent ran the real `shardsim` binary against an in-process scheduler (`httptest`), a reaper loop and a fake GPU worker it played itself, observing only through Postgres, the binary's stdout and its timeline JSON. 9 tests, all passed: determinism of the replayed workload across processes; every query recorded once, in order, and finished, with one CPU per shard and builds done at attempt 1; `needs_index` queries never start before the build finishes while independent ones run; a local build occupies the CPU for exactly its scaled time; reports every poll interval with sticky `stream_done`; a preemption honoured within 100 ms with the independent queries draining on the freed CPU; SIGTERM exits in milliseconds; a bad scenario exits 2 with no traffic; the timeline JSON matches Postgres field for field across two mixed-placement rounds.
-
-| Finding | Resolution |
-| --- | --- |
-| `POLL_INTERVAL=0s` accepted: 746 requests in 3 s, then the round timed out. | Decision 57: validation at startup. |
-| SIGTERM mid-round exits 0 silently and leaves the round open with `finished_at` NULL. | Decision 57: a warning names the open round. No "abandoned" state exists; recorded as an open question. |
-| Query run times inflated 1.6 to 1.8x at a time scale of 20 by the bracketing HTTP calls. | Documented above as a fidelity bound; batched client-timestamped reporting (step 7) removes it. |
-| `seq` semantics, local `attempt 0`, preemption reaction time unstated. | Stated above. |
-| Pre-DDL dropping never exercised in a live round. | True; staggered is Phase 3's scenario (open question 4). |
-
-### Cross-check of step 4, the Compose stack (2026-10-05)
-
-A fresh agent wrote 9 Go tests (10 cases) that bring up their own copy of the stack under project `kgpu-xcheck` and drive it only through the API and the `docker` CLI. 7 cases passed, 3 failed. Passing cases of note: `docker stop` on a leaseholder with a long remainder released the build and another worker re-claimed it within 0.4 s, before the lease would have expired; with a short remainder the build was finished before exit; a lease that expired while the scheduler was *stopped* was reaped exactly once by the next scheduler; `--scale worker=3` gave three simultaneous leases by three distinct owners.
-
-| Finding | Resolution |
-| --- | --- |
-| **Bug.** Eight simultaneous submits of one build into a round's last slot: one 201, seven 409 "round full" instead of 200 `created:false`. | Bug log 6, commit `422d722`: the duplicate check moved after the round lock, like the count. Store test with five trials. |
-| **Bug.** `docker compose restart postgres` crashed both workers with tracebacks; the build was still recovered by the reaper as attempt 2. | Bug log 7, decision 48: reconnect while idle, retry guarded writes until the lease deadline, errored renews are not rejections. Python test kills every backend connection mid-build with `pg_terminate_backend`; the worker keeps its lease and completes attempt 1. |
-| **Spec was wrong.** The agent's kill test asserted that `docker kill` is followed by a restart, as decision 47 and the step 4 table then claimed. It is not: Docker treats `docker kill` as a manual stop. | The implementer had found the same thing hours earlier (see decision 47); the agent's test was updated to crash the worker's own process from inside the container, which the restart policy does recover. Both findings agree. |
-| Budget vs grace period; releases counted as lost; no deregistration on clean exit; `WORKER_ID` reused across restarts; errored vs rejected renew; reap timing bound. | Decisions 48 to 50. |
-
-### Cross-check of step 3, the worker (2026-10-04)
-
-A fresh agent wrote 11 Go tests that run the real worker process (`python -m kgpu_worker`) as a subprocess, configure it only through its documented environment variables, and observe Postgres and the worker's log. 9 passed, 2 failed. Among the passes: `kill -9` mid-build with a second worker completing attempt 2 exactly once; SIGSTOP past the lease, SIGCONT, and the row byte-for-byte unchanged a full build time later; a reclaimed build cancelled within one renew interval; both SIGTERM branches.
-
-| Finding | Resolution |
-| --- | --- |
-| **Bug.** The first heartbeat raced the first claim: the claim's `started_at` was 3 to 6 ms before the worker's `registered_at`, so pool state could miss a worker that was already busy. | The first heartbeat is synchronous, before the loop starts. Python test `registers_before_first_claim`. |
-| **Bug, serious.** `COST_BANDWIDTH=0`, a documented override, made the builder's arithmetic raise after the claim; the process died with exit 1 and the row stayed `leased`. The reaper would requeue it and the next worker would crash the same way: a poison pill. | Decisions 39 and 41. Bug log 5. The agent's test became two: bad config is refused at startup with exit 2 and no claim; a build error via `FAKE_FAIL_BUILD_IDS` ends in `failed` with the reason and the worker lives on. |
-| No way to fail a fake build. | Decision 40, `FAKE_FAIL_BUILD_IDS`. |
-| After a lost lease, does the worker keep claiming? Budget units? SIGTERM while idle or during a claim? Which stream? Log message names? `RENEW >= LEASE`? | All stated in the behaviour paragraph, the config table, the log vocabulary table, and decision 39. |
-
-### Cross-check of steps 1 and 2, second run (2026-10-02, against the revised spec)
-
-A fresh agent wrote 16 tests from the revised spec. 12 passed, 4 failed. Findings and what was done:
-
-| Finding | Resolution |
-| --- | --- |
-| **Bug, serious.** Twelve concurrent submits into a round with `n_shards = 3` all succeeded, over HTTP and through the store. The cap held only for sequential submits. Cause: the build count was a subquery inside the `SELECT … FOR UPDATE` statement. Under READ COMMITTED a statement's snapshot is taken when it starts, before it blocks on the lock, so the waiter counted zero builds even after the winner committed. | Fixed: lock in one statement, count in the next (fresh snapshot). The agent's two concurrency tests now pass. |
-| **Bug.** A `stream_done` report from a shard with no build (reachable through the store, not HTTP) completed a round while a real shard was still streaming. | Fixed; decision 33. The agent's test was updated to the stricter resolution (the report is refused, not ignored). |
-| **Spec disagreement.** Preempt reset `enqueued_at` to now; decisions 24 and 31 say it keeps the submit time. | Fixed: preempt no longer touches `enqueued_at`; decision 31 reworded. |
-| Arrival validation unspecified (unknown round, no build, after `stream_done`, finished round). | 404 / 404 / 409; decision 33; API table. A finished round has every shard `stream_done`, so the last case is covered by the 409. |
-| `stream_done` could be withdrawn by a later report. | Sticky; decision 33. |
-| Renege sets `started_at`; 400 for an invalid report and 200 for start/done not in the API table; unknown round on report shares the 404. | Documented in decision 31 and the API table. |
-| `ErrRoundFinished` is unreachable on its own. | True; kept as a defensive guard and noted in the store doc. |
-| Stale "follow-up job" wording in the store package. | Fixed. |
-
-### Cross-check of steps 1 and 2, first run (2026-10-02, before the model revision)
-
-An independent agent (`.claude/agents/crosscheck-tester.md`, Opus, fresh context) wrote 14 black-box tests in `scheduler/crosscheck/` from the spec alone, without reading the implementation. 13 passed. The one failure and the gaps it reported, with what was done:
-
-| Finding | Resolution |
-| --- | --- |
-| **Bug.** A duplicate `POST /builds` returned `cpu_build_ms` and `gpu_total_ms` computed from the repeat's request body while `mem_bytes` came from the stored row. A shard retrying with a different body would sleep for the wrong time. | Fixed: all estimates on a duplicate come from the stored row. The cross-check test now passes. |
-| Which columns reap and release clear was unspecified; clearing `started_at` loses the first attempt's start. | Decision 24. |
-| `Renew` succeeds on an expired-but-unreaped lease. | Intended; decision 25. |
-| A failed GPU build leaves a `needs_index` job that can never start, so the round never finishes. | Open question below; fake builds cannot fail, so this is decided when real failures arrive (Phase 4). |
-| `shard_id` not validated against `n_shards`; submits to a finished round accepted. | Fixed with a per-round cap rather than an id range; decision 27. |
-| Job endpoints returned 409 for a nonexistent job. | Now 404; API table updated. |
-| "Fits" boundary, heartbeat capacity change, concurrent duplicate submits unspecified. | Decision 26. |
-| `reason` on a duplicate is not the original reason. | Not stored; the doc comment and API table now say so. |
-| Stale duplicate API table in this doc. | Removed. |
-
-Smoke test of the real binary: started before Postgres was ready (connect retry observed), migrated both files, answered `/healthz`, created a round, placed a build on the GPU queue with zero live workers (decision 19), and shut down cleanly on SIGTERM.
 
 ## Open questions
 
