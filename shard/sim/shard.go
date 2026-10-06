@@ -88,6 +88,7 @@ type Shard struct {
 	mu         sync.Mutex
 	b          buildState
 	queue      []*queued
+	cpuFreeAt  time.Time // virtual CPU clock: when the current query's modeled time ends (decision 65)
 	nextSeq    int32
 	dirty      []*queued // records changed since the last report (arrived, started or finished)
 	submitted  bool      // the build exists at the scheduler; reports may begin
@@ -256,23 +257,37 @@ func (s *Shard) nextReady() int {
 
 // runQuery occupies the CPU for the query's scaled duration. Timestamps are
 // taken locally and reported in the next batch; no HTTP on this path.
+//
+// The CPU is a virtual clock (decision 65): a query starts when the CPU is
+// free or when it arrived, whichever is later, and finishes exactly its
+// scaled duration after that. The goroutine sleeps to that absolute
+// deadline. A late wake-up (timer slop, scheduling) therefore does not
+// stretch the recorded run time and does not accumulate: the next sleep is
+// shorter by the same amount. Measured before this: +0.6 ms per query.
 func (s *Shard) runQuery(ctx context.Context, item *queued) {
-	now := time.Now()
 	s.mu.Lock()
-	item.started = &now
+	start := time.Now()
+	if s.cpuFreeAt.After(start) {
+		start = s.cpuFreeAt
+	}
+	if item.arrived.After(start) {
+		start = item.arrived
+	}
+	end := start.Add(s.cfg.scale(item.q.Duration))
+	s.cpuFreeAt = end
+	item.started = &start
 	s.dirty = append(s.dirty, item)
 	s.mu.Unlock()
 	select {
-	case <-time.After(s.cfg.scale(item.q.Duration)):
+	case <-time.After(time.Until(end)):
 	case <-ctx.Done():
 		return
 	}
-	end := time.Now()
 	s.mu.Lock()
 	item.finished = &end
 	s.dirty = append(s.dirty, item)
 	s.event("query %d done: %s %s waited %s", item.seq, item.q.Kind, map[bool]string{true: "needs_index", false: ""}[item.q.NeedsIndex],
-		item.started.Sub(item.arrived).Round(time.Millisecond))
+		start.Sub(item.arrived).Round(time.Millisecond))
 	s.mu.Unlock()
 }
 
@@ -326,6 +341,7 @@ func (s *Shard) runLocalBuild(ctx context.Context, dur time.Duration) {
 		return
 	}
 	s.b.state, s.b.indexReady, s.b.progress = "done", true, 1
+	s.cpuFreeAt = time.Now()
 	s.event("local build done after %s", time.Since(started).Round(time.Millisecond))
 	s.log.Info("local build done", "attempt", 0)
 }
