@@ -353,6 +353,14 @@ func (s *Shard) reports(ctx context.Context) {
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
 	}
+	// Spread the shards' report beats across the interval (decision 66): shard
+	// k starts its cadence at (k mod 10)/10 of an interval, deterministically,
+	// so 50 shards do not all report in the same few milliseconds.
+	select {
+	case <-time.After(interval * time.Duration(s.w.ShardID%10) / 10):
+	case <-ctx.Done():
+		return
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	sentFinal := false

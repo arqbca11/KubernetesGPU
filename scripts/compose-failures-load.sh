@@ -112,7 +112,8 @@ timeline_line "$R" "${BID%%:*}"
 say "3. Restart the scheduler mid-round; shards retry their calls (decision 61)"
 R=$(wait_new_round "$R"); note "round $R started"
 wait_leased "$R" 60 >/dev/null || fail "no leased build in round $R"
-sleep 1; note "restarting the scheduler now"; $C restart scheduler >/dev/null 2>&1
+sleep 1; note "stopping the scheduler for 1.5 s, then starting it (a plain restart can be too quick to land between two report beats)"
+$C stop scheduler >/dev/null 2>&1; sleep 1.5; $C start scheduler >/dev/null 2>&1
 for _ in $(seq 1 60); do curl -sf "$API/healthz" >/dev/null 2>&1 && break; sleep 0.5; done; note "scheduler back"
 wait_round_finished "$R" || fail "round $R did not finish across the scheduler restart"
 check_round "$R"
