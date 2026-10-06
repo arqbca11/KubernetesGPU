@@ -86,6 +86,8 @@ Toolchain (macOS, Homebrew): `brew install go python@3.12 uv libpq && brew insta
 | Run the shard simulator against a running scheduler | `SCHEDULER_URL=http://127.0.0.1:8080 TIME_SCALE=10 LOG_FORMAT=text go run ./shard/cmd/shardsim` (env vars at the top of `shard/cmd/shardsim/main.go`) |
 | Run the whole stack | `docker compose -f deploy/compose.yaml up -d --build` (add `--scale worker=3` for three workers); `docker compose -f deploy/compose.yaml logs -f scheduler worker`; `docker compose -f deploy/compose.yaml down -v` to stop and drop the database. API on `127.0.0.1:8080`. Knobs are env vars, see the top of `deploy/compose.yaml`; `FAKE_TIME_SCALE=10` speeds fake builds up. |
 | Compose failure tests (kill, pause, scheduler restart, duplicate submit) | `scripts/compose-failures.sh` (saves `test-logs/phase1/step4-compose-failures.log`; `KEEP=1` leaves the stack up) |
+| The same failure tests under simulator load | `scripts/compose-failures-load.sh` (continuous rounds; saves `test-logs/phase1/step6-compose-failures-load.log`; `N_SHARDS=50 WORKERS=3 LOG=phase1/step7-...` for step 7) |
+| One or more simulator rounds on the stack, with the timeline | `scripts/compose-round.sh` (`SCENARIO`, `N_SHARDS`, `ROUNDS`, `FAKE_TIME_SCALE`; saves `test-logs/phase1/step5-compose-round.log` by default) |
 
 | Run the scheduler locally | `DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/kgpu?sslmode=disable LOG_FORMAT=text go run ./scheduler/cmd/scheduler` (env vars documented at the top of `scheduler/cmd/scheduler/main.go`) |
 | Build the scheduler image | `docker build -f scheduler/Dockerfile -t kgpu-scheduler .` (context is the repo root) |

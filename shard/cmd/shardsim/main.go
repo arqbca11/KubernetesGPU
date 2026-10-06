@@ -93,6 +93,7 @@ func main() {
 
 	for i := 0; rounds == 0 || i < rounds; i++ {
 		if ctx.Err() != nil {
+			log.Info("stopped by signal between rounds")
 			return
 		}
 		w := workload.Generate(sc, seed+int64(i))
@@ -118,10 +119,12 @@ func main() {
 			select {
 			case <-time.After(gap):
 			case <-ctx.Done():
+				log.Info("stopped by signal between rounds")
 				return
 			}
 		}
 	}
+	log.Info("all rounds done", "rounds", rounds)
 }
 
 func printWorkload(w workload.Workload) {

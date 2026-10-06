@@ -1,25 +1,41 @@
 // Package client is the shard's view of the scheduler: the HTTP calls a shard
 // makes (design doc, API table). Nothing else in the shard knows about HTTP.
+//
+// Every call is idempotent on the scheduler side (build_id, seq, guarded
+// updates, upserts), so the client retries transient failures (connection
+// errors, 5xx) with backoff for up to RetryFor, and a scheduler restart
+// mid-round is survivable (decision 61). A 409 on a job start/done after a
+// retry means the first attempt landed; it is treated as success.
 package client
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
 
 type Client struct {
-	base string
-	http *http.Client
+	base     string
+	http     *http.Client
+	RetryFor time.Duration // give up on a call after this long of transient failures
+	Log      *slog.Logger  // optional; retries are logged at WARN
 }
 
 func New(base string) *Client {
-	return &Client{base: base, http: &http.Client{Timeout: 10 * time.Second}}
+	return &Client{base: base, http: &http.Client{Timeout: 10 * time.Second}, RetryFor: 60 * time.Second}
 }
+
+// transientError marks a failure worth retrying.
+type transientError struct{ err error }
+
+func (e transientError) Error() string { return e.err.Error() }
+func (e transientError) Unwrap() error { return e.err }
 
 // ---- request / response shapes (mirrors scheduler/api) ----------------------
 
@@ -162,13 +178,15 @@ func (c *Client) Arrival(ctx context.Context, round int64, shard int32, req Arri
 	return err
 }
 
+// JobStart and JobDone accept 409 as well as 200: after a retry, 409 means the
+// earlier attempt was recorded before its reply was lost.
 func (c *Client) JobStart(ctx context.Context, round int64, shard, seq int32) error {
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/jobs/%d/%d/%d/start", round, shard, seq), nil, nil, 200)
+	_, err := c.do(ctx, "POST", fmt.Sprintf("/jobs/%d/%d/%d/start", round, shard, seq), nil, nil, 200, 409)
 	return err
 }
 
 func (c *Client) JobDone(ctx context.Context, round int64, shard, seq int32) error {
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/jobs/%d/%d/%d/done", round, shard, seq), nil, nil, 200)
+	_, err := c.do(ctx, "POST", fmt.Sprintf("/jobs/%d/%d/%d/done", round, shard, seq), nil, nil, 200, 409)
 	return err
 }
 
@@ -201,30 +219,69 @@ func (c *Client) Healthy(ctx context.Context) bool {
 	return err == nil
 }
 
-// do sends one request and decodes the JSON reply. A status outside ok is an
-// error carrying the server's message.
+// do sends one request, retrying transient failures with backoff for up to
+// RetryFor, and decodes the JSON reply. A status outside ok is an error
+// carrying the server's message.
 func (c *Client) do(ctx context.Context, method, path string, body, out any, ok ...int) (int, error) {
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return 0, err
 		}
-		rd = bytes.NewReader(b)
+		payload = b
+	}
+	deadline := time.Now().Add(c.RetryFor)
+	wait := 200 * time.Millisecond
+	attempts := 0
+	for {
+		attempts++
+		code, err := c.once(ctx, method, path, payload, out, ok)
+		var te transientError
+		if err == nil || !errors.As(err, &te) || ctx.Err() != nil {
+			if attempts > 1 && err == nil && c.Log != nil {
+				c.Log.Info("scheduler call succeeded after retries", "call", method+" "+path, "attempts", attempts)
+			}
+			return code, err
+		}
+		if time.Now().Add(wait).After(deadline) {
+			return code, fmt.Errorf("%s %s: gave up after %d attempts over %s: %w", method, path, attempts, c.RetryFor, te.err)
+		}
+		if c.Log != nil {
+			c.Log.Warn("scheduler call failed, retrying", "call", method+" "+path, "attempt", attempts, "in", wait, "err", te.err.Error())
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return code, ctx.Err()
+		}
+		if wait < 3*time.Second {
+			wait *= 2
+		}
+	}
+}
+
+func (c *Client) once(ctx context.Context, method, path string, payload []byte, out any, ok []int) (int, error) {
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return 0, err
 	}
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("%s %s: %w", method, path, err)
+		return 0, transientError{fmt.Errorf("%s %s: %w", method, path, err)}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 500 {
+		return resp.StatusCode, transientError{fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, bytes.TrimSpace(raw))}
+	}
 	accepted := false
 	for _, k := range ok {
 		if resp.StatusCode == k {

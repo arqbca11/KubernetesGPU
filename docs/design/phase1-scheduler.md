@@ -242,6 +242,7 @@ Local: the backlog grows at λ for the whole build, then drains at (service rate
 | 58 | **`NeedsIndex` stays independent of fan-out** in the generator. A later preset may couple them (every fan-out needs the index, the unfiltered-vector-search regime) via a new contract field | Tie the flag to fan-out now | The roadmap sweeps the needs-index fraction and the fan-out mix separately; coupling them would make a result impossible to attribute. A tenant-filtered vector search is a real single-shard index query, so the independent model is simpler, not wrong. Owner's call, 2026-10-05 (generator open question 1). |
 | 59 | **Staggered DDL: pre-DDL queries are real load and are backfilled.** A shard runs queries that arrive before its DDL on its CPU as normal, keeps their arrival, start and finish times on its own clock, and sends them to the scheduler once its build exists. Phase 1 drops them (step 5); Phase 3 implements the backfill on top of decision 60 | Per-shard measurement window starting at the DDL | A shard that was already busy when its DDL arrived starts its build with a backlog, which is exactly the effect the staggered scenario exists to show; a per-shard window loses it and gives fan-out queries straddling two windows a partial latency. Owner's call, 2026-10-05 (generator open question 4). |
 | 60 | **Query records are batched and client-timestamped.** Each shard keeps every query's arrival, start and finish on its own clock and sends them to the scheduler once per poll interval, in one call alongside its load report; the scheduler writes the batch in one transaction. Build timestamps stay server-assigned (workers write them through SQL). Replaces the three HTTP calls per query from step 5 | Keep per-event calls; scale Postgres (read replicas, partitioning, a separate telemetry store) | Two reasons and one principle. Capacity: at 50 shards a round is 30k to 40k shard-level queries, so per-event calls at a 10x time scale would be tens of thousands of writes per second against one scheduler and one Postgres; batching makes it about 100 calls per second. Fidelity: the bracketing calls inflated each query's recorded run time by 1.6 to 1.8x at a 20x scale (step 5 cross-check); with client timestamps the CPU loop sleeps exactly the scaled duration. **The principle (owner, 2026-10-05): the scheduler's Postgres is a control-plane store and must stay simple and unscaled. It holds decisions and their inputs at control-plane rates: builds, leases, rounds, per-shard load summaries. Shard telemetry exists to inform GPU placement, so it is aggregated at the shard and reported at the report cadence, never streamed per event. If the information the policy needs cannot be carried that way, the design is wrong, not the database too small.** Cost: query timestamps now depend on shard clocks (zero skew on one machine, NTP-level on Kubernetes). Implemented in step 7. |
+| 61 | **The shard's client retries transient failures** (connection errors, 5xx) with backoff for up to `RetryFor` (60 s); a 409 on a job start or done after a retry counts as recorded, since the first attempt landed before its reply was lost | Fail the shard on the first error | Every shard call is idempotent on the scheduler side (`build_id`, `seq` with `ON CONFLICT`, guarded updates, upserts), so retrying is safe, and a scheduler restart mid-round (roadmap failure test 3) is then invisible to the round: seven retried calls, all succeeded, no shard failed. The Phase 2 "retries with backoff on every call" item, done early for the shard side. |
 
 ## Implementation notes
 
@@ -413,6 +414,26 @@ Details the cross-check asked to have stated: `seq` is 0-based and counts record
 6. Should index-needing queries cost more CPU than others?
 7. `math/rand/v2`'s derived methods are not promised stable across Go releases; store generated workloads as JSON alongside results, not only the seed.
 8. ~~Capacity at 50 shards~~ Decided: batched, client-timestamped reporting, decision 60, implemented in step 7.
+
+### Step 6: the failure tests under simulator load (done 2026-10-05)
+
+| Path | What |
+| --- | --- |
+| `shard/client` | Retry with backoff; 409 on start/done as recorded (decision 61). Unit tests with a fake scheduler. |
+| `shard/cmd/shardsim` | Logs a stop between rounds. |
+| `scripts/compose-failures-load.sh` | The stack with the simulator running continuous rounds (6 shards, skewed, 2x time scale, 5 s leases); each test waits for a round with a leased build, injects the failure, and checks the round still completes: every build done once, every query finished, the round stamped. Saves `test-logs/phase1/step6-compose-failures-load.log`. |
+| `scripts/jget.py` | JSON expression helper for the scripts. |
+
+Results (2026-10-05 run), each on a live round of about 3,500 queries:
+
+| Test | Observed |
+| --- | --- |
+| Baseline round | 3,412 queries, 6 builds done at attempt 1, round stamped at 15 s real. |
+| Crash the leaseholder mid-build | The shard's own log shows the build go leased → queued (reaped) → leased at attempt 2 → done; completed exactly once; the shard's index-ready came 8.9 s in instead of about 7; the round finished with every query done; the pool returned to 2. |
+| Pause the leaseholder past its lease | Attempt 2 completed once; the paused worker logged `renew rejected` and `lost ownership` for attempt 1; the round finished. |
+| Restart the scheduler mid-round | Seven shard calls failed and were retried, all succeeded; no shard failed; every build still at attempt 1 (workers never noticed); the round finished. |
+| Duplicate submit during a round | 200 `created:false`, `n_vectors` unchanged, round finished. |
+| `docker stop` the simulator | It logs `stopped by signal` and exits 0. |
 
 ### Cross-check of step 5, the shard simulator (2026-10-05)
 

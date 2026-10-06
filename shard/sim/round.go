@@ -48,6 +48,9 @@ func RunRound(ctx context.Context, api *client.Client, w workload.Workload, cfg 
 		return nil, fmt.Errorf("create round: %w", err)
 	}
 	log = log.With("round_id", roundID)
+	if api.Log == nil {
+		api.Log = log
+	}
 	log.Info("round started", "scenario", w.Scenario.Name, "seed", w.Seed, "n_shards", w.Scenario.NShards, "time_scale", cfg.Shard.TimeScale)
 	start := time.Now()
 

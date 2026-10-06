@@ -95,6 +95,28 @@ Pure functions; no database. The generator's modeling choices and their referenc
 | DDLOffsets | Staggered at 6 and 50 shards; every other preset. | Staggered offsets lie in [0, Spread] and span it, and the horizon outlasts the spread; all-at-once offsets are zero. |
 | PresetTable | All presets at 6 and 50 shards. | Prints each preset's parameters (documentation only). |
 
+## Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`
+
+The stack with the simulator running continuous six-shard rounds at 2x; each failure is injected into a live round.
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 0 | A baseline round | About 3,400 queries recorded and finished, six builds done at attempt 1, round stamped. |
+| 1 | Crash the worker holding a lease mid-build | The build finishes at attempt 2 exactly once; the shard sees leased → queued → leased → done through its reports; every query still finishes; the pool recovers. |
+| 2 | Pause the leaseholder past its lease, then unpause | Attempt 2 once; the paused worker logs lost ownership for attempt 1; the round completes. |
+| 3 | Restart the scheduler mid-round | Shards retry failed calls and succeed (decision 61); no shard fails; builds stay at attempt 1; the round completes. |
+| 4 | Resubmit a build with a different body during the round | 200 `created:false`, the row unchanged. |
+| 5 | `docker stop` the simulator | It logs the stop and exits cleanly. |
+
+## Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| RetriesTransientFailuresThenSucceeds | A fake scheduler answers 503 twice, then 200. | The call succeeds after three requests with backoff; the caller never sees the failures (decision 61). |
+| GivesUpAfterRetryFor | A fake scheduler always answers 502. | The call fails with a clear error once the retry budget is spent. |
+| NonTransientErrorsAreNotRetried | A fake scheduler answers 404. | One request, immediate error: 4xx is not retried. |
+| JobStartTreats409AsRecorded | Start and done answer 409. | Both count as recorded, the lost-reply case. |
+
 ## Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`
 
 These run the real `shardsim` binary against an in-process scheduler, a reaper loop and a fake GPU worker, and observe only through Postgres, the binary's stdout and its timeline JSON.

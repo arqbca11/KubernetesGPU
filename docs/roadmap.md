@@ -193,10 +193,10 @@ RETURNING build_id, attempt, n_vectors, dim;
 
 ### Failure tests
 
-- [x] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once *(on Compose, step 4; to be repeated under the shard simulator in step 6 and at 50 shards in step 7)*
-- [x] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for. *(Compose, step 4; repeat in steps 6 and 7)*
-- [x] Restart the scheduler mid-round: the round still completes, because all state is in Postgres *(Compose, step 4; repeat in steps 6 and 7)*
-- [x] A shard resubmits the same build: the primary key makes it a no-op *(API level, steps 2 and 4; repeat with the real shard client in step 6)*
+- [x] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once *(Compose, step 4; under simulator load, step 6; at 50 shards in step 7)*
+- [x] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for. *(Compose, step 4; under load, step 6; step 7 pending)*
+- [x] Restart the scheduler mid-round: the round still completes, because all state is in Postgres *(Compose, step 4; under load with shard-side retries, step 6; step 7 pending)*
+- [x] A shard resubmits the same build: the primary key makes it a no-op *(API level, steps 2, 4 and 6; the shard client's retry path relies on it)*
 
 ## Phase 2: Kubernetes on kind
 
