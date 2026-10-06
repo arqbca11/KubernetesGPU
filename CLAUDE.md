@@ -24,7 +24,7 @@ Update this line when a phase is done. Don't start work that belongs to a later 
 
 ## Invariants (never break these)
 
-1. **All shared state lives in Postgres.** Scheduler, shards and workers keep no state that must survive a restart.
+1. **All shared state lives in Postgres.** Scheduler, shards and workers keep no state that must survive a restart. Postgres is a control-plane store and stays simple and unscaled: it holds decisions and their inputs at control-plane rates (builds, leases, rounds, per-shard load summaries). Shard telemetry is aggregated at the shard and reported at the report cadence, never streamed per event (decision 60).
 2. **Workers pull; the scheduler never pushes jobs to workers.** A worker claims with `FOR UPDATE SKIP LOCKED`.
 3. **Every write to a `builds` row after the claim is a conditional `UPDATE` guarded by `build_id` and `attempt`.** No unconditional writes. Zero rows updated means the caller lost ownership and must stop.
 4. **`attempt` increments on every claim.** It is the fencing token.
