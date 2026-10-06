@@ -4,6 +4,25 @@ Every test in the repo, in plain words: the scenario it sets up and what it prov
 
 Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are numbered in `docs/design/phase1-scheduler.md`.
 
+## Contents
+
+Each step has its own tests first, then the independent cross-check's.
+
+- [Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`](#step-1-the-store-go-schedulerstore-log-step1-storelog)
+- [Step 2: scheduler API, policy, cost model (Go). Log: `step2-scheduler.log`](#step-2-scheduler-api-policy-cost-model-go-log-step2-schedulerlog)
+- [Steps 1 and 2, cross-check (Go, `scheduler/crosscheck`, non-worker tests). Log: `step2-crosscheck.log`](#steps-1-and-2-cross-check-go-schedulercrosscheck-non-worker-tests-log-step2-crosschecklog)
+- [Step 3: the Python worker (`worker/tests`). Log: `step3-worker.log`](#step-3-the-python-worker-workertests-log-step3-workerlog)
+- [Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`](#step-3-cross-check-of-the-worker-as-a-black-box-process-go-schedulercrosscheck-worker-tests-log-step3-crosscheck-workerlog)
+- [Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`](#step-4-compose-failure-tests-scriptscompose-failuressh-log-step4-compose-failureslog)
+- [Step 4, cross-check of the Compose stack (Go, `scheduler/crosscheck`, `Compose*` tests; need `KGPU_COMPOSE=1`). Log: `step4-crosscheck-compose.log`](#step-4-cross-check-of-the-compose-stack-go-schedulercrosscheck-compose-tests-need-kgpucompose1-log-step4-crosscheck-composelog)
+- [Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`](#step-5-shard-simulator-go-shardsim-log-step5-shardsimlog)
+- [Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`](#step-5-workload-generator-go-experimentsworkload-written-by-an-independent-agent-log-step5-workloadlog)
+- [Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`](#step-5-cross-check-of-the-shard-simulator-as-a-black-box-process-go-schedulercrosscheck-shardsim-tests-log-step5-crosscheck-shardsimlog)
+- [Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`](#step-6-shard-client-unit-tests-go-shardclient-log-step5-shardsimlog)
+- [Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`](#step-6-failure-tests-under-simulator-load-scriptscompose-failures-loadsh-log-step6-compose-failures-loadlog)
+- [Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`](#step-6-cross-check-under-load-go-schedulercrosscheck-load-tests-need-kgpucompose1-log-step6-crosscheck-loadlog)
+
+
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
 | Test | Scenario | Proves |
@@ -75,88 +94,24 @@ Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are n
 | test_survives_lost_database_connections_mid_build | Mid-build, every one of the worker's backend connections is terminated server-side with `pg_terminate_backend` (what a Postgres restart does to clients). | All three threads reconnect; the lease is renewed in time (no reap, attempt stays 1); the build completes; the worker goes on to claim and complete the next one (bug log 7, decision 48). |
 | test_renew_outage_past_lease_deadline_assumes_lost | Every renew raises a connection error for longer than the lease. | The worker assumes the lease is lost, cancels the build, counts it lost and writes nothing (decision 48). |
 
-## Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`
+## Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`
 
-Pure functions; no database. The generator's modeling choices and their references are in `experiments/workload/DESIGN.md`.
-
-| Test | Scenario | Proves |
-| --- | --- | --- |
-| Determinism | Every preset generated twice with seed 42, once with 43. | Same seed gives byte-identical JSON; a different seed differs (invariant 10). |
-| PresetsValidate | All 6 presets at 6 and 50 shards, seeds 1 to 5; a bad name; 0 shards. | Every preset passes `Validate()`; bad inputs are errors. |
-| ZipfSkew | The skewed preset at exponents 0.5, 1.0, 1.5. | Largest/median ratio is at least 3 at 1.0, rises with the exponent, stays mild at 0.5; sizes stay within [Min, Max]. |
-| BimodalTwoClusters | Bimodal at 6 and 50 shards, 5 seeds. | Two size clusters with nothing between, the right heavy count, and some but not all heavy builds exceed the advised worker memory. |
-| ClusterQueryRate | uniform, skewed, downstream_heavy at 6 and 50 shards, 3 seeds. | The number of cluster-level queries is within 4 standard deviations of rate times horizon. |
-| PerShardLoadMatchesTarget | Skewed at 6 and 50 shards, 4 seeds. | Mean piece duration matches config; per-shard CPU utilisation is 0.4 within 15% at both scales. |
-| NeedsIndexFraction | Skewed at 50 shards, fractions 0, 0.5, 0.8, 1. | The fraction by cluster query is within 0.03; all pieces of one query agree; local DDL never needs the index. |
-| FanOutPieces | Skewed at 6 and 50 shards. | Fan-out pieces share id and arrival and land on distinct shards; width stays in range and covers it; single-shard queries have one piece; the fan-out fraction matches. |
-| HotShard | downstream_heavy at 6 and 50 shards over a 600 s horizon. | The hot shard gets about M times a typical shard's single-shard queries and about 4 times its CPU load. |
-| StreamFiniteAndSorted | All presets at 50 shards. | Shard ids in order; streams sorted; arrivals within [0, Horizon]; durations positive; non-fan-out ids unique. |
-| LocalDDL | Skewed at 50 shards over a 400 s horizon. | Local DDL count is about rate times shards times horizon; mean duration about the configured 2 s. |
-| DDLOffsets | Staggered at 6 and 50 shards; every other preset. | Staggered offsets lie in [0, Spread] and span it, and the horizon outlasts the spread; all-at-once offsets are zero. |
-| PresetTable | All presets at 6 and 50 shards. | Prints each preset's parameters (documentation only). |
-
-## Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`
-
-The stack with the simulator running continuous six-shard rounds at 2x; each failure is injected into a live round.
-
-| Step | Scenario | Proves |
-| --- | --- | --- |
-| 0 | A baseline round | About 3,400 queries recorded and finished, six builds done at attempt 1, round stamped. |
-| 1 | Crash the worker holding a lease mid-build | The build finishes at attempt 2 exactly once; the shard sees leased → queued → leased → done through its reports; every query still finishes; the pool recovers. |
-| 2 | Pause the leaseholder past its lease, then unpause | Attempt 2 once; the paused worker logs lost ownership for attempt 1; the round completes. |
-| 3 | Restart the scheduler mid-round | Shards retry failed calls and succeed (decision 61); no shard fails; builds stay at attempt 1; the round completes. |
-| 4 | Resubmit a build with a different body during the round | 200 `created:false`, the row unchanged. |
-| 5 | `docker stop` the simulator | It logs the stop and exits cleanly. |
-
-## Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`
-
-Their own stack with the simulator running continuous rounds; after each injected failure the round is verified: stamped within 1 ms of its last child finish, every build done with exactly one `completed` line at the recorded attempt, every query finished in order with no `needs_index` query before its build, every shard `stream_done`, the simulator's timeline agreeing.
+These start the real `python -m kgpu_worker` as a subprocess, configure it only through its documented environment variables, and watch Postgres and its log.
 
 | Test | Scenario | Proves |
 | --- | --- | --- |
-| LoadCrashLeaseholderMidBuild | SIGKILL the python process inside the leaseholder of a build of at least 100k vectors, mid-round. | One reap, the next attempt completes once, the round is stamped with every query finished, the pool returns to 2 (roadmap failure test 1). |
-| LoadPauseLeaseholderPastLease | `docker pause` 8 s against a 5 s lease, mid-round. | The worker logs `renew rejected` and `lost ownership` for attempt 1 and never completes it; attempt 2 completes once (roadmap failure test 2). |
-| LoadSchedulerRestartMidRound | `docker compose restart scheduler` mid-round. | Every build stays at attempt 1; the shards log 12 retried and 12 recovered calls; the round completes (roadmap failure test 3, decision 61). |
-| LoadDuplicateSubmitDuringRound | Eight concurrent duplicates into a full live round; a new shard 99; a duplicate after the round finished. | All duplicates 200 `created:false` with the stored decision and the row unchanged; the new shard 409; the late duplicate still 200 (roadmap failure test 4, bug log 6). |
-| LoadLargestBuildKilledTwiceReachesAttempt3 | Crash the largest build's leaseholder at attempt 1 and again at attempt 2. | Exactly one `lease expired` per attempt, done at attempt 3, timeline `att=3`; that shard finishes last (20.1 s against 15 s), straggler lag 5.1 s, and the round's duration equals its finish: one slow shard holds up the round. |
-| LoadPostgresRestartMidRound | `docker compose restart postgres` mid-round under load. | The round completes correctly and neither worker restarts (decision 48 under real traffic). |
-| LoadDockerStopLeaseholderMidRound | `docker stop` the largest build's leaseholder with about 3.8 s left against a 5 s budget. | It logs `finishing current build before exit`, completes attempt 1, claims nothing more, deregisters at once, stays stopped (decisions 37, 49). |
-| LoadFinalReportShowsEmptyBacklog | Audit the settled `shard_status` of every round the run produced. | Every round's reports settle to an empty backlog; at stamp time a report can still lag by one interval (decision 62). |
-
-## Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`
-
-| Test | Scenario | Proves |
-| --- | --- | --- |
-| RetriesTransientFailuresThenSucceeds | A fake scheduler answers 503 twice, then 200. | The call succeeds after three requests with backoff; the caller never sees the failures (decision 61). |
-| GivesUpAfterRetryFor | A fake scheduler always answers 502. | The call fails with a clear error once the retry budget is spent. |
-| NonTransientErrorsAreNotRetried | A fake scheduler answers 404. | One request, immediate error: 4xx is not retried. |
-| JobStartTreats409AsRecorded | Start and done answer 409. | Both count as recorded, the lost-reply case. |
-
-## Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`
-
-These run the real `shardsim` binary against an in-process scheduler, a reaper loop and a fake GPU worker, and observe only through Postgres, the binary's stdout and its timeline JSON.
-
-| Test | Scenario | Proves |
-| --- | --- | --- |
-| ShardsimPrintWorkloadMatchesGenerate | `PRINT_WORKLOAD=1` run twice for four preset/seed/shard combinations, up to 50 shards, compared with `Generate` in the test process. | The binary replays exactly the seeded workload, deterministically across processes (invariant 10, decision 51). |
-| ShardsimGPURoundRecordsEveryQueryOnce | A default six-shard round at 20x against two fake GPU workers. | Every workload query is recorded once, in order, and finished; builds end gpu/done at attempt 1, each claimed once; one CPU per shard (no overlapping runs); the round is stamped (decisions 28, 30, 32, 53). |
-| ShardsimNeedsIndexWaitsForGPUBuild | The GPU is held back one second while queries pile up. | No `needs_index` query starts before its shard's build finished; independent queries are not blocked by them (decision 32). |
-| ShardsimLocalBuildOccupiesCPU | The only worker has one byte of memory, so every build goes local. | A local build holds the CPU for cpu_build divided by the time scale (2.194 s against 2.187 s expected) and no query starts before it is done; local builds stay at attempt 0 (decisions 7, 32, 55). |
-| ShardsimReportsCadenceAndStickyStreamDone | `shard_status` sampled every 20 ms during a round with a delayed GPU. | Reports come every `POLL_INTERVAL` and carry the backlog; `stream_done` comes after the last arrival and never flips back (decisions 29, 30, 33). |
-| ShardsimHonoursPreemption | A running 200k local build is preempted at 0.4 s of 4.4 s, then a fake worker claims it. | The shard aborts within 100 ms, independent queries start on the freed CPU 189 ms later, `needs_index` queries wait for the GPU, the build ends gpu/done at attempt 1 by the worker's guarded complete (decisions 31, 54). |
-| ShardsimSIGTERMStopsPromptly | SIGTERM mid-round at time scale 1. | The process exits within about 10 ms and records no further arrivals (decision 57). |
-| ShardsimBadScenarioExitsBeforeScheduler | An unknown `SCENARIO`. | Exit 2 within milliseconds, zero HTTP requests, no round created (decision 57). |
-| ShardsimTimelineJSONAgreesWithPostgres | Two bimodal rounds with mixed GPU and local placement and `TIMELINE_DIR` set. | The per-round JSON matches Postgres field for field (counts, placements, attempts, timestamps within 5 ms, exact duration); each query's kind and cluster id match the workload; rounds use seed, seed+1 (decision 56). |
-
-## Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`
-
-Integration tests: the real scheduler API over HTTP, real Postgres, and an in-test fake worker that claims and completes GPU builds. Workloads are hand-built, so these do not depend on the generator.
-
-| Test | Scenario | Proves |
-| --- | --- | --- |
-| TwoShardRoundEndToEnd | Two shards, an 8 GiB worker, a fan-out query that spans both shards and needs the index, independent queries, a single-shard query; the round runs at 20x. | Both builds go to the GPU and finish at attempt 1; every query finishes; a query that needs the index never starts before its shard's build is done; an independent query runs at once on a free CPU; the fan-out query's latency is its slowest piece's; the round is stamped and the timeline has every shard, query and cluster query (decisions 32, 52, 56). |
-| LocalBuildBlocksThenDrains | A worker with 1 byte of capacity, so the build is placed local; two queries arrive during it, one needing the index. | Both queries start only after the local build finishes: the CPU was occupied (modeling assumption; decision 32). |
-| PreemptionAbortsLocalBuild | A local build is preempted to the GPU queue at about 20% progress (as Phase 3's reconsider would), and a capable worker appears. | The shard aborts the local build at its next slice, the independent query runs on the freed CPU while the GPU builds, the index query waits for the GPU completion, and the build ends done at attempt 1 (decisions 31, 54). |
+| WorkerHeartbeatsBeforeFirstClaimAndEveryInterval | A worker starts with a build waiting; the test compares its registration time with the claim time and watches `last_seen` move. | Registered before the first claim; heartbeats keep arriving at the configured interval. This test caught the heartbeat race. |
+| WorkerCompletesBuildForScaledModelTime | One build; measure how long the worker takes. | Claim then complete with attempt 1; the build lasts the cost model's time divided by `FAKE_TIME_SCALE` (1.63 s measured vs 1.63 s modeled); every build log line carries build_id, attempt and round_id. |
+| WorkerTextLogFormatCarriesBuildFields | Same with `LOG_FORMAT=text`. | The three fields are present in text logs too. |
+| WorkerClaimsOnlyWhatFitsItsMemory | A worker with 5000 bytes of capacity; builds of 5001 (higher priority) and 5000 bytes. | The 5001-byte build is never claimed; the 5000-byte one is (fits means `<=`). |
+| WorkerRenewKeepsLeaseAliveUnderReaper | A 3.3 s build with a 1 s lease while the test runs the reaper every 100 ms. | The lease is never reaped; `lease_until` advanced 15 times. The renewer does its job. |
+| WorkerKill9MidBuildAnotherWorkerCompletesOnce | Worker A claims; the test sends SIGKILL mid-build; the reaper runs; worker B is started. | Reap reports attempt 1 owned by A; B completes attempt 2; exactly one completion. Roadmap failure test 1. |
+| WorkerSIGSTOPPastLeaseLosesOwnershipAndWritesNothing | Worker A is paused with SIGSTOP past its lease; the reaper and a second claim move on; A gets SIGCONT. | A's renew is rejected, it logs `lost ownership` for attempt 1, and the row is byte-for-byte unchanged a full build time later; A exits 0 on SIGTERM. Roadmap failure test 2. |
+| WorkerReclaimedMidBuildCancelsWithinARenewInterval | Mid-build, the test requeues and re-leases the row to another owner. | `lost ownership` appears within one renew interval, about 5 s before the build would have ended; no complete, fail or release follows (decision 36). |
+| WorkerSIGTERMReleasesBuildOverBudget | SIGTERM with more remaining time than the budget. | Row back to queued with attempt 1 and lease columns NULL; the next claim gets attempt 2; exit 0 (decisions 24, 37). |
+| WorkerSIGTERMFinishesBuildWithinBudgetAndStopsClaiming | SIGTERM with 2.75 s remaining and the default 5 s budget; a second build is queued. | The current build reaches done; the second stays untouched at attempt 0; exit 0. |
+| WorkerBadConfigIsRefusedBeforeAnyClaim | `COST_BANDWIDTH=0` with a build waiting. | Exit 2 with the variable named on stderr; the build is still queued at attempt 0; no worker row (decision 39). This scenario was the original poison-pill crash (bug log 5). |
+| WorkerBuildErrorRecordsFailWithReason | One build in `FAKE_FAIL_BUILD_IDS`, one healthy. | The failing build ends `failed` with the exception text and no lease; the worker completes the other and is still running (decision 41). |
 
 ## Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`
 
@@ -187,21 +142,85 @@ These bring up their own copy of the stack (project `kgpu-xcheck`) and drive it 
 | ComposeScaleToThreeWorkers | `--scale worker=3`, submit three 6.5 s builds, then scale back to 2. | The pool reports 3 live workers; three builds are leased at once by three distinct owners, each done once with attempt 1; the pool drops back to 2 after scale-down (decisions 6, 46, invariant 2). |
 | ComposePostgresRestartMidBuild | `docker compose restart postgres` 1 s into a leased build, then check the build, the pool, the round and a fresh build. | The stack recovers, data survives on the named volume, the in-flight build completes exactly once, and no worker crashes (decision 48). Caught bug log 7. |
 
-## Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`
+## Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`
 
-These start the real `python -m kgpu_worker` as a subprocess, configure it only through its documented environment variables, and watch Postgres and its log.
+Integration tests: the real scheduler API over HTTP, real Postgres, and an in-test fake worker that claims and completes GPU builds. Workloads are hand-built, so these do not depend on the generator.
 
 | Test | Scenario | Proves |
 | --- | --- | --- |
-| WorkerHeartbeatsBeforeFirstClaimAndEveryInterval | A worker starts with a build waiting; the test compares its registration time with the claim time and watches `last_seen` move. | Registered before the first claim; heartbeats keep arriving at the configured interval. This test caught the heartbeat race. |
-| WorkerCompletesBuildForScaledModelTime | One build; measure how long the worker takes. | Claim then complete with attempt 1; the build lasts the cost model's time divided by `FAKE_TIME_SCALE` (1.63 s measured vs 1.63 s modeled); every build log line carries build_id, attempt and round_id. |
-| WorkerTextLogFormatCarriesBuildFields | Same with `LOG_FORMAT=text`. | The three fields are present in text logs too. |
-| WorkerClaimsOnlyWhatFitsItsMemory | A worker with 5000 bytes of capacity; builds of 5001 (higher priority) and 5000 bytes. | The 5001-byte build is never claimed; the 5000-byte one is (fits means `<=`). |
-| WorkerRenewKeepsLeaseAliveUnderReaper | A 3.3 s build with a 1 s lease while the test runs the reaper every 100 ms. | The lease is never reaped; `lease_until` advanced 15 times. The renewer does its job. |
-| WorkerKill9MidBuildAnotherWorkerCompletesOnce | Worker A claims; the test sends SIGKILL mid-build; the reaper runs; worker B is started. | Reap reports attempt 1 owned by A; B completes attempt 2; exactly one completion. Roadmap failure test 1. |
-| WorkerSIGSTOPPastLeaseLosesOwnershipAndWritesNothing | Worker A is paused with SIGSTOP past its lease; the reaper and a second claim move on; A gets SIGCONT. | A's renew is rejected, it logs `lost ownership` for attempt 1, and the row is byte-for-byte unchanged a full build time later; A exits 0 on SIGTERM. Roadmap failure test 2. |
-| WorkerReclaimedMidBuildCancelsWithinARenewInterval | Mid-build, the test requeues and re-leases the row to another owner. | `lost ownership` appears within one renew interval, about 5 s before the build would have ended; no complete, fail or release follows (decision 36). |
-| WorkerSIGTERMReleasesBuildOverBudget | SIGTERM with more remaining time than the budget. | Row back to queued with attempt 1 and lease columns NULL; the next claim gets attempt 2; exit 0 (decisions 24, 37). |
-| WorkerSIGTERMFinishesBuildWithinBudgetAndStopsClaiming | SIGTERM with 2.75 s remaining and the default 5 s budget; a second build is queued. | The current build reaches done; the second stays untouched at attempt 0; exit 0. |
-| WorkerBadConfigIsRefusedBeforeAnyClaim | `COST_BANDWIDTH=0` with a build waiting. | Exit 2 with the variable named on stderr; the build is still queued at attempt 0; no worker row (decision 39). This scenario was the original poison-pill crash (bug log 5). |
-| WorkerBuildErrorRecordsFailWithReason | One build in `FAKE_FAIL_BUILD_IDS`, one healthy. | The failing build ends `failed` with the exception text and no lease; the worker completes the other and is still running (decision 41). |
+| TwoShardRoundEndToEnd | Two shards, an 8 GiB worker, a fan-out query that spans both shards and needs the index, independent queries, a single-shard query; the round runs at 20x. | Both builds go to the GPU and finish at attempt 1; every query finishes; a query that needs the index never starts before its shard's build is done; an independent query runs at once on a free CPU; the fan-out query's latency is its slowest piece's; the round is stamped and the timeline has every shard, query and cluster query (decisions 32, 52, 56). |
+| LocalBuildBlocksThenDrains | A worker with 1 byte of capacity, so the build is placed local; two queries arrive during it, one needing the index. | Both queries start only after the local build finishes: the CPU was occupied (modeling assumption; decision 32). |
+| PreemptionAbortsLocalBuild | A local build is preempted to the GPU queue at about 20% progress (as Phase 3's reconsider would), and a capable worker appears. | The shard aborts the local build at its next slice, the independent query runs on the freed CPU while the GPU builds, the index query waits for the GPU completion, and the build ends done at attempt 1 (decisions 31, 54). |
+
+## Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`
+
+Pure functions; no database. The generator's modeling choices and their references are in `experiments/workload/DESIGN.md`.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| Determinism | Every preset generated twice with seed 42, once with 43. | Same seed gives byte-identical JSON; a different seed differs (invariant 10). |
+| PresetsValidate | All 6 presets at 6 and 50 shards, seeds 1 to 5; a bad name; 0 shards. | Every preset passes `Validate()`; bad inputs are errors. |
+| ZipfSkew | The skewed preset at exponents 0.5, 1.0, 1.5. | Largest/median ratio is at least 3 at 1.0, rises with the exponent, stays mild at 0.5; sizes stay within [Min, Max]. |
+| BimodalTwoClusters | Bimodal at 6 and 50 shards, 5 seeds. | Two size clusters with nothing between, the right heavy count, and some but not all heavy builds exceed the advised worker memory. |
+| ClusterQueryRate | uniform, skewed, downstream_heavy at 6 and 50 shards, 3 seeds. | The number of cluster-level queries is within 4 standard deviations of rate times horizon. |
+| PerShardLoadMatchesTarget | Skewed at 6 and 50 shards, 4 seeds. | Mean piece duration matches config; per-shard CPU utilisation is 0.4 within 15% at both scales. |
+| NeedsIndexFraction | Skewed at 50 shards, fractions 0, 0.5, 0.8, 1. | The fraction by cluster query is within 0.03; all pieces of one query agree; local DDL never needs the index. |
+| FanOutPieces | Skewed at 6 and 50 shards. | Fan-out pieces share id and arrival and land on distinct shards; width stays in range and covers it; single-shard queries have one piece; the fan-out fraction matches. |
+| HotShard | downstream_heavy at 6 and 50 shards over a 600 s horizon. | The hot shard gets about M times a typical shard's single-shard queries and about 4 times its CPU load. |
+| StreamFiniteAndSorted | All presets at 50 shards. | Shard ids in order; streams sorted; arrivals within [0, Horizon]; durations positive; non-fan-out ids unique. |
+| LocalDDL | Skewed at 50 shards over a 400 s horizon. | Local DDL count is about rate times shards times horizon; mean duration about the configured 2 s. |
+| DDLOffsets | Staggered at 6 and 50 shards; every other preset. | Staggered offsets lie in [0, Spread] and span it, and the horizon outlasts the spread; all-at-once offsets are zero. |
+| PresetTable | All presets at 6 and 50 shards. | Prints each preset's parameters (documentation only). |
+
+## Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`
+
+These run the real `shardsim` binary against an in-process scheduler, a reaper loop and a fake GPU worker, and observe only through Postgres, the binary's stdout and its timeline JSON.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| ShardsimPrintWorkloadMatchesGenerate | `PRINT_WORKLOAD=1` run twice for four preset/seed/shard combinations, up to 50 shards, compared with `Generate` in the test process. | The binary replays exactly the seeded workload, deterministically across processes (invariant 10, decision 51). |
+| ShardsimGPURoundRecordsEveryQueryOnce | A default six-shard round at 20x against two fake GPU workers. | Every workload query is recorded once, in order, and finished; builds end gpu/done at attempt 1, each claimed once; one CPU per shard (no overlapping runs); the round is stamped (decisions 28, 30, 32, 53). |
+| ShardsimNeedsIndexWaitsForGPUBuild | The GPU is held back one second while queries pile up. | No `needs_index` query starts before its shard's build finished; independent queries are not blocked by them (decision 32). |
+| ShardsimLocalBuildOccupiesCPU | The only worker has one byte of memory, so every build goes local. | A local build holds the CPU for cpu_build divided by the time scale (2.194 s against 2.187 s expected) and no query starts before it is done; local builds stay at attempt 0 (decisions 7, 32, 55). |
+| ShardsimReportsCadenceAndStickyStreamDone | `shard_status` sampled every 20 ms during a round with a delayed GPU. | Reports come every `POLL_INTERVAL` and carry the backlog; `stream_done` comes after the last arrival and never flips back (decisions 29, 30, 33). |
+| ShardsimHonoursPreemption | A running 200k local build is preempted at 0.4 s of 4.4 s, then a fake worker claims it. | The shard aborts within 100 ms, independent queries start on the freed CPU 189 ms later, `needs_index` queries wait for the GPU, the build ends gpu/done at attempt 1 by the worker's guarded complete (decisions 31, 54). |
+| ShardsimSIGTERMStopsPromptly | SIGTERM mid-round at time scale 1. | The process exits within about 10 ms and records no further arrivals (decision 57). |
+| ShardsimBadScenarioExitsBeforeScheduler | An unknown `SCENARIO`. | Exit 2 within milliseconds, zero HTTP requests, no round created (decision 57). |
+| ShardsimTimelineJSONAgreesWithPostgres | Two bimodal rounds with mixed GPU and local placement and `TIMELINE_DIR` set. | The per-round JSON matches Postgres field for field (counts, placements, attempts, timestamps within 5 ms, exact duration); each query's kind and cluster id match the workload; rounds use seed, seed+1 (decision 56). |
+
+## Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| RetriesTransientFailuresThenSucceeds | A fake scheduler answers 503 twice, then 200. | The call succeeds after three requests with backoff; the caller never sees the failures (decision 61). |
+| GivesUpAfterRetryFor | A fake scheduler always answers 502. | The call fails with a clear error once the retry budget is spent. |
+| NonTransientErrorsAreNotRetried | A fake scheduler answers 404. | One request, immediate error: 4xx is not retried. |
+| JobStartTreats409AsRecorded | Start and done answer 409. | Both count as recorded, the lost-reply case. |
+
+## Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`
+
+The stack with the simulator running continuous six-shard rounds at 2x; each failure is injected into a live round.
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 0 | A baseline round | About 3,400 queries recorded and finished, six builds done at attempt 1, round stamped. |
+| 1 | Crash the worker holding a lease mid-build | The build finishes at attempt 2 exactly once; the shard sees leased → queued → leased → done through its reports; every query still finishes; the pool recovers. |
+| 2 | Pause the leaseholder past its lease, then unpause | Attempt 2 once; the paused worker logs lost ownership for attempt 1; the round completes. |
+| 3 | Restart the scheduler mid-round | Shards retry failed calls and succeed (decision 61); no shard fails; builds stay at attempt 1; the round completes. |
+| 4 | Resubmit a build with a different body during the round | 200 `created:false`, the row unchanged. |
+| 5 | `docker stop` the simulator | It logs the stop and exits cleanly. |
+
+## Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`
+
+Their own stack with the simulator running continuous rounds; after each injected failure the round is verified: stamped within 1 ms of its last child finish, every build done with exactly one `completed` line at the recorded attempt, every query finished in order with no `needs_index` query before its build, every shard `stream_done`, the simulator's timeline agreeing.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| LoadCrashLeaseholderMidBuild | SIGKILL the python process inside the leaseholder of a build of at least 100k vectors, mid-round. | One reap, the next attempt completes once, the round is stamped with every query finished, the pool returns to 2 (roadmap failure test 1). |
+| LoadPauseLeaseholderPastLease | `docker pause` 8 s against a 5 s lease, mid-round. | The worker logs `renew rejected` and `lost ownership` for attempt 1 and never completes it; attempt 2 completes once (roadmap failure test 2). |
+| LoadSchedulerRestartMidRound | `docker compose restart scheduler` mid-round. | Every build stays at attempt 1; the shards log 12 retried and 12 recovered calls; the round completes (roadmap failure test 3, decision 61). |
+| LoadDuplicateSubmitDuringRound | Eight concurrent duplicates into a full live round; a new shard 99; a duplicate after the round finished. | All duplicates 200 `created:false` with the stored decision and the row unchanged; the new shard 409; the late duplicate still 200 (roadmap failure test 4, bug log 6). |
+| LoadLargestBuildKilledTwiceReachesAttempt3 | Crash the largest build's leaseholder at attempt 1 and again at attempt 2. | Exactly one `lease expired` per attempt, done at attempt 3, timeline `att=3`; that shard finishes last (20.1 s against 15 s), straggler lag 5.1 s, and the round's duration equals its finish: one slow shard holds up the round. |
+| LoadPostgresRestartMidRound | `docker compose restart postgres` mid-round under load. | The round completes correctly and neither worker restarts (decision 48 under real traffic). |
+| LoadDockerStopLeaseholderMidRound | `docker stop` the largest build's leaseholder with about 3.8 s left against a 5 s budget. | It logs `finishing current build before exit`, completes attempt 1, claims nothing more, deregisters at once, stays stopped (decisions 37, 49). |
+| LoadFinalReportShowsEmptyBacklog | Audit the settled `shard_status` of every round the run produced. | Every round's reports settle to an empty backlog; at stamp time a report can still lag by one interval (decision 62). |
