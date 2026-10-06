@@ -108,6 +108,21 @@ The stack with the simulator running continuous six-shard rounds at 2x; each fai
 | 4 | Resubmit a build with a different body during the round | 200 `created:false`, the row unchanged. |
 | 5 | `docker stop` the simulator | It logs the stop and exits cleanly. |
 
+## Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`
+
+Their own stack with the simulator running continuous rounds; after each injected failure the round is verified: stamped within 1 ms of its last child finish, every build done with exactly one `completed` line at the recorded attempt, every query finished in order with no `needs_index` query before its build, every shard `stream_done`, the simulator's timeline agreeing.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| LoadCrashLeaseholderMidBuild | SIGKILL the python process inside the leaseholder of a build of at least 100k vectors, mid-round. | One reap, the next attempt completes once, the round is stamped with every query finished, the pool returns to 2 (roadmap failure test 1). |
+| LoadPauseLeaseholderPastLease | `docker pause` 8 s against a 5 s lease, mid-round. | The worker logs `renew rejected` and `lost ownership` for attempt 1 and never completes it; attempt 2 completes once (roadmap failure test 2). |
+| LoadSchedulerRestartMidRound | `docker compose restart scheduler` mid-round. | Every build stays at attempt 1; the shards log 12 retried and 12 recovered calls; the round completes (roadmap failure test 3, decision 61). |
+| LoadDuplicateSubmitDuringRound | Eight concurrent duplicates into a full live round; a new shard 99; a duplicate after the round finished. | All duplicates 200 `created:false` with the stored decision and the row unchanged; the new shard 409; the late duplicate still 200 (roadmap failure test 4, bug log 6). |
+| LoadLargestBuildKilledTwiceReachesAttempt3 | Crash the largest build's leaseholder at attempt 1 and again at attempt 2. | Exactly one `lease expired` per attempt, done at attempt 3, timeline `att=3`; that shard finishes last (20.1 s against 15 s), straggler lag 5.1 s, and the round's duration equals its finish: one slow shard holds up the round. |
+| LoadPostgresRestartMidRound | `docker compose restart postgres` mid-round under load. | The round completes correctly and neither worker restarts (decision 48 under real traffic). |
+| LoadDockerStopLeaseholderMidRound | `docker stop` the largest build's leaseholder with about 3.8 s left against a 5 s budget. | It logs `finishing current build before exit`, completes attempt 1, claims nothing more, deregisters at once, stays stopped (decisions 37, 49). |
+| LoadFinalReportShowsEmptyBacklog | Audit the settled `shard_status` of every round the run produced. | Every round's reports settle to an empty backlog; at stamp time a report can still lag by one interval (decision 62). |
+
 ## Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`
 
 | Test | Scenario | Proves |

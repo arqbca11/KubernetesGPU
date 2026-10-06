@@ -17,6 +17,7 @@ Narrated test output, kept so what was checked and what happened can be read wit
 | `phase1/step5-compose-round.log` | Step 5: the first real six-shard round on the Compose stack, with the timeline. |
 | `phase1/step5-crosscheck-shardsim.log` | The cross-check agent's nine black-box tests of the `shardsim` binary. |
 | `phase1/step6-compose-failures-load.log` | Step 6: the four failure tests injected into live rounds on the Compose stack. |
+| `phase1/step6-crosscheck-load.log` | The cross-check agent's eight under-load scenarios (`Load*` tests, need `KGPU_COMPOSE=1`). |
 
 Per-step logs are the state of the tests at the end of that step, including any fixes from the step's cross-check round, regenerated whenever the step's code changes. `history/` (local only, not committed) keeps every timestamped run.
 

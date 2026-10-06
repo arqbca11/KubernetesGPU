@@ -1,0 +1,224 @@
+== Go tests against a throwaway Postgres
+date:      2026-10-05 21:56:33 PDT
+commit:    97fb5c8 (uncommitted changes)
+go:        go1.27.1
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-82923, port 21920)
+go:        go test -p 1 -count=1 -v -run Load -timeout 30m ./scheduler/crosscheck/
+python:    skipped
+
+Lines starting with 'store_test.go:N:' are the test narrating what it did.
+Lines tagged [db] are the build row as Postgres had it at that moment.
+
+== go test
+=== RUN   TestLoadCrashLeaseholderMidBuild
+    load_test.go:29: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up Less than a second; kgpu-xcheck-worker-1(77a199e04415):Up Less than a second; kgpu-xcheck-worker-2(d67e306f9733):Up Less than a second; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 5 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up 8 seconds (healthy)
+    load_test.go:30: [api] fresh round 2 started at 04:57:04.732 with 6 builds submitted
+    load_test.go:34: [inject] round 2: build_id=4:2 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil> (n_vectors=100000) leased to kgpu-xcheck-worker-2; crashing it mid-build
+    load_test.go:36: [docker] SIGKILL python inside kgpu-xcheck-worker-2 (exec err=<nil> ) in 0.04s
+    load_test.go:36: [docker] kgpu-xcheck-worker-2 restarted by policy: RestartCount 0 -> 1, 0.1s after the kill
+    load_test.go:38: [api] +0.0s build_id=4:2 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil>
+    load_test.go:38: [api] +5.7s build_id=4:2 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    load_test.go:38: [api] +5.8s build_id=4:2 placement=gpu state=leased attempt=2 lease_owner=77a199e04415 finished_at=<nil>
+    load_test.go:38: [api] +8.0s build_id=4:2 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=04:57:14.907
+    load_test.go:39: [api] build 4:2 ended build_id=4:2 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=04:57:14.907, 8.2s after the kill (lease 5 s + rebuild)
+    load_test.go:47: [scheduler] time=2026-10-06T04:57:12.556Z level=WARN msg="lease expired, build back to queued" build_id=4:2 round_id=2 attempt=1 lease_owner=d67e306f9733
+    load_test.go:52: [api] round 2 stamped finished_at=04:57:19.837 (15.11s after start)
+    load_test.go:52: [finding] shard 4's last stored report: stream_done=true queue_depth=6 waiting_needs_index=4 although every query finished
+    load_test.go:52: [shards] time=2026-10-06T04:57:20.266Z level=INFO msg="round finished" round_id=2 duration=15.105s duration_modeled=30.21s straggler_lag=126ms builds_gpu=6 builds_local=0 queries=3670
+    load_test.go:52: [shards] round 2  scenario=skewed seed=2  time_scale=2 | duration 15.1s real (30.2s modeled)   straggler lag 0.1s   builds: 6 gpu, 0 local   queries: 3670
+    load_test.go:52: [timeline] shard 0 n_vectors=200000 place=gpu att=1 b.done=7.4s finish=15.0s queries=626 max_wait=7.5s
+    load_test.go:52: [timeline] shard 1 n_vectors=50000 place=gpu att=1 b.done=3.6s finish=14.9s queries=579 max_wait=3.9s
+    load_test.go:52: [timeline] shard 2 n_vectors=40000 place=gpu att=1 b.done=3.8s finish=14.9s queries=606 max_wait=3.9s
+    load_test.go:52: [timeline] shard 3 n_vectors=33333 place=gpu att=1 b.done=1.9s finish=15.0s queries=617 max_wait=1.9s
+    load_test.go:52: [timeline] shard 4 n_vectors=100000 place=gpu att=2 b.done=10.2s finish=15.1s queries=623 max_wait=10.5s
+    load_test.go:52: [timeline] shard 5 n_vectors=66667 place=gpu att=1 b.done=2.0s finish=15.0s queries=619 max_wait=2.0s
+    load_test.go:52: [verify] round 2 complete and correct: 6 builds done once each, 3670 queries finished, stamped at the latest child finish
+    load_test.go:55: [shards] time=2026-10-06T04:57:04.744Z level=INFO msg=submitted round_id=2 shard_id=4 build_id=4:2 placement=gpu reason=always_gpu n_vectors=100000 attempt=0
+    load_test.go:55: [shards] time=2026-10-06T04:57:06.745Z level=INFO msg="build state" round_id=2 shard_id=4 build_id=4:2 placement=gpu state=leased attempt=1
+    load_test.go:55: [shards] time=2026-10-06T04:57:15.245Z level=INFO msg="index ready" round_id=2 shard_id=4 build_id=4:2 attempt=2 placement=gpu
+    load_test.go:55: [shards] time=2026-10-06T04:57:15.245Z level=INFO msg="build state" round_id=2 shard_id=4 build_id=4:2 placement=gpu state=done attempt=2
+    load_test.go:60: [note] the shard's 500 ms report did not catch 4:2 leased at attempt 2 (the window can be short)
+    load_test.go:63: [verify] pool back to 2 live workers after the crash
+--- PASS: TestLoadCrashLeaseholderMidBuild (45.59s)
+=== RUN   TestLoadPauseLeaseholderPastLease
+    load_test.go:72: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up 32 seconds; kgpu-xcheck-worker-1(77a199e04415):Up 33 seconds; kgpu-xcheck-worker-2(d67e306f9733):Up 13 seconds; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 38 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up 40 seconds (healthy)
+    load_test.go:73: [api] fresh round 3 started at 04:57:21.287 with 6 builds submitted
+    load_test.go:78: [inject] round 3: build_id=1:3 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil> leased to kgpu-xcheck-worker-2; docker pause for 8 s against a 5 s lease
+    load_test.go:82: [api] +0.0s build_id=1:3 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil>
+    load_test.go:82: [api] +5.9s build_id=1:3 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    load_test.go:84: [api] while kgpu-xcheck-worker-2 is paused: build_id=1:3 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    load_test.go:90: [inject] unpaused kgpu-xcheck-worker-2 after 8.0s
+    load_test.go:103: [log kgpu-xcheck-worker-2] 04:57:29.693 WARNING renew rejected: lease lost, cancelling build build_id=1:3 attempt=1 round_id=3
+    load_test.go:103: [log kgpu-xcheck-worker-2] 04:57:29.693 WARNING lost ownership build_id=1:3 attempt=1 round_id=3 why=lease was lost during the build; not completing
+    load_test.go:103: [log kgpu-xcheck-worker-2] 04:57:29.693 WARNING renew rejected: lease lost, cancelling build build_id=1:3 attempt=1 round_id=3
+    load_test.go:108: [api] +0.0s build_id=1:3 placement=gpu state=leased attempt=2 lease_owner=d67e306f9733 finished_at=<nil>
+    load_test.go:108: [api] +2.3s build_id=1:3 placement=gpu state=done attempt=2 lease_owner=<nil> finished_at=04:57:32.016
+    load_test.go:112: [api] round 3 stamped finished_at=04:57:36.389 (15.10s after start)
+    load_test.go:112: [finding] shard 0's last stored report: stream_done=true queue_depth=3 waiting_needs_index=1 although every query finished
+    load_test.go:112: [finding] shard 1's last stored report: stream_done=true queue_depth=9 waiting_needs_index=3 although every query finished
+    load_test.go:112: [shards] time=2026-10-06T04:57:36.822Z level=INFO msg="round finished" round_id=3 duration=15.102s duration_modeled=30.204s straggler_lag=101ms builds_gpu=6 builds_local=0 queries=3466
+    load_test.go:112: [shards] round 3  scenario=skewed seed=3  time_scale=2 | duration 15.1s real (30.2s modeled)   straggler lag 0.1s   builds: 6 gpu, 0 local   queries: 3466
+    load_test.go:112: [timeline] shard 0 n_vectors=66667 place=gpu att=1 b.done=5.1s finish=15.1s queries=573 max_wait=5.5s
+    load_test.go:112: [timeline] shard 1 n_vectors=100000 place=gpu att=2 b.done=10.7s finish=15.1s queries=583 max_wait=11.0s
+    load_test.go:112: [timeline] shard 2 n_vectors=50000 place=gpu att=1 b.done=3.3s finish=15.0s queries=586 max_wait=3.5s
+    load_test.go:112: [timeline] shard 3 n_vectors=200000 place=gpu att=1 b.done=8.9s finish=15.0s queries=602 max_wait=9.0s
+    load_test.go:112: [timeline] shard 4 n_vectors=33333 place=gpu att=1 b.done=10.3s finish=15.0s queries=556 max_wait=10.5s
+    load_test.go:112: [timeline] shard 5 n_vectors=40000 place=gpu att=1 b.done=1.6s finish=15.0s queries=566 max_wait=2.0s
+    load_test.go:112: [verify] round 3 complete and correct: 6 builds done once each, 3466 queries finished, stamped at the latest child finish
+    load_test.go:119: [verify] 1:3 finished once at attempt 2; the woken worker was fenced out
+    load_test.go:120: [shards] time=2026-10-06T04:57:21.298Z level=INFO msg=submitted round_id=3 shard_id=1 build_id=1:3 placement=gpu reason=always_gpu n_vectors=100000 attempt=0
+    load_test.go:120: [shards] time=2026-10-06T04:57:21.798Z level=INFO msg="build state" round_id=3 shard_id=1 build_id=1:3 placement=gpu state=leased attempt=1
+    load_test.go:120: [shards] time=2026-10-06T04:57:27.799Z level=INFO msg="build state" round_id=3 shard_id=1 build_id=1:3 placement=gpu state=queued attempt=1
+    load_test.go:120: [shards] time=2026-10-06T04:57:29.798Z level=INFO msg="build state" round_id=3 shard_id=1 build_id=1:3 placement=gpu state=leased attempt=2
+    load_test.go:120: [shards] time=2026-10-06T04:57:32.299Z level=INFO msg="index ready" round_id=3 shard_id=1 build_id=1:3 attempt=2 placement=gpu
+    load_test.go:120: [shards] time=2026-10-06T04:57:32.299Z level=INFO msg="build state" round_id=3 shard_id=1 build_id=1:3 placement=gpu state=done attempt=2
+--- PASS: TestLoadPauseLeaseholderPastLease (16.53s)
+=== RUN   TestLoadSchedulerRestartMidRound
+    load_test.go:130: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up 49 seconds; kgpu-xcheck-worker-1(77a199e04415):Up 49 seconds; kgpu-xcheck-worker-2(d67e306f9733):Up 30 seconds; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 54 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up 57 seconds (healthy)
+    load_test.go:131: [api] fresh round 4 started at 04:57:37.839 with 6 builds submitted
+    load_test.go:135: [inject] round 4 mid-flight (build_id=2:4 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil>); restarting the scheduler
+    load_test.go:137: [docker] compose -p kgpu-xcheck restart scheduler (0.3s)
+    load_test.go:139: [docker] scheduler healthy again 0.0s after the restart command returned; StartedAt 2026-10-06T04:56:42.481010588Z -> 2026-10-06T04:57:38.369405919Z
+    load_test.go:145: [api] round 4 stamped finished_at=04:57:52.907 (15.07s after start)
+    load_test.go:145: [finding] shard 2's last stored report: stream_done=true queue_depth=3 waiting_needs_index=2 although every query finished
+    load_test.go:145: [shards] time=2026-10-06T04:57:53.373Z level=INFO msg="round finished" round_id=4 duration=15.068s duration_modeled=30.136s straggler_lag=67ms builds_gpu=6 builds_local=0 queries=3589
+    load_test.go:145: [shards] round 4  scenario=skewed seed=4  time_scale=2 | duration 15.1s real (30.1s modeled)   straggler lag 0.1s   builds: 6 gpu, 0 local   queries: 3589
+    load_test.go:145: [timeline] shard 0 n_vectors=33333 place=gpu att=1 b.done=3.1s finish=14.9s queries=579 max_wait=3.5s
+    load_test.go:145: [timeline] shard 1 n_vectors=100000 place=gpu att=1 b.done=7.0s finish=15.0s queries=586 max_wait=7.4s
+    load_test.go:145: [timeline] shard 2 n_vectors=40000 place=gpu att=1 b.done=1.7s finish=15.1s queries=609 max_wait=1.9s
+    load_test.go:145: [timeline] shard 3 n_vectors=50000 place=gpu att=1 b.done=4.7s finish=15.0s queries=595 max_wait=4.9s
+    load_test.go:145: [timeline] shard 4 n_vectors=66667 place=gpu att=1 b.done=5.9s finish=15.0s queries=627 max_wait=5.9s
+    load_test.go:145: [timeline] shard 5 n_vectors=200000 place=gpu att=1 b.done=4.0s finish=15.0s queries=593 max_wait=4.5s
+    load_test.go:145: [verify] round 4 complete and correct: 6 builds done once each, 3589 queries finished, stamped at the latest child finish
+    load_test.go:161: [shards] 12 'scheduler call failed, retrying' lines, 12 'succeeded after retries' lines since the restart
+    load_test.go:162: [shards] time=2026-10-06T04:57:38.226Z level=WARN msg="scheduler call failed, retrying" round_id=1 call="POST /jobs/4/1" attempt=1 in=200ms err="POST /jobs/4/1: Post \"http://scheduler:8080/jobs/4/1\": EOF"
+    load_test.go:162: [shards] time=2026-10-06T04:57:38.227Z level=WARN msg="scheduler call failed, retrying" round_id=1 call="POST /jobs/4/0" attempt=1 in=200ms err="POST /jobs/4/0: Post \"http://scheduler:8080/jobs/4/0\": dial tcp 172.18.0.3:8080: connect: connection refused"
+    load_test.go:162: [shards] time=2026-10-06T04:57:38.227Z level=WARN msg="scheduler call failed, retrying" round_id=1 call="POST /jobs/4/2" attempt=1 in=200ms err="POST /jobs/4/2: Post \"http://scheduler:8080/jobs/4/2\": dial tcp 172.18.0.3:8080: connect: connection refused"
+    load_test.go:162: [shards] time=2026-10-06T04:57:38.227Z level=WARN msg="scheduler call failed, retrying" round_id=1 call="POST /jobs/4/5" attempt=1 in=200ms err="POST /jobs/4/5: Post \"http://scheduler:8080/jobs/4/5\": dial tcp 172.18.0.3:8080: connect: connection refused"
+    load_test.go:162: [shards] time=2026-10-06T04:57:38.227Z level=WARN msg="scheduler call failed, retrying" round_id=1 call="POST /jobs/4/3" attempt=1 in=200ms err="POST /jobs/4/3: Post \"http://scheduler:8080/jobs/4/3\": dial tcp 172.18.0.3:8080: connect: connection refused"
+    load_test.go:163: [shards] time=2026-10-06T04:57:38.428Z level=INFO msg="scheduler call succeeded after retries" round_id=1 call="POST /jobs/4/1" attempts=2
+    load_test.go:163: [shards] time=2026-10-06T04:57:38.431Z level=INFO msg="scheduler call succeeded after retries" round_id=1 call="POST /jobs/4/5" attempts=2
+    load_test.go:163: [shards] time=2026-10-06T04:57:38.431Z level=INFO msg="scheduler call succeeded after retries" round_id=1 call="POST /jobs/4/0" attempts=2
+    load_test.go:163: [shards] time=2026-10-06T04:57:38.432Z level=INFO msg="scheduler call succeeded after retries" round_id=1 call="POST /jobs/4/3" attempts=2
+    load_test.go:163: [shards] time=2026-10-06T04:57:38.432Z level=INFO msg="scheduler call succeeded after retries" round_id=1 call="POST /jobs/4/2" attempts=2
+--- PASS: TestLoadSchedulerRestartMidRound (16.46s)
+=== RUN   TestLoadDuplicateSubmitDuringRound
+    load_test.go:178: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up About a minute; kgpu-xcheck-worker-1(77a199e04415):Up About a minute; kgpu-xcheck-worker-2(d67e306f9733):Up 46 seconds; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 15 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up About a minute (healthy)
+    load_test.go:179: [api] fresh round 5 started at 04:57:54.393 with 6 builds submitted
+    load_test.go:181: [inject] round 5 is full (6 of 6 builds); resubmitting 2:5 8 times concurrently with n_vectors=200001
+    load_test.go:211: [api] 8 concurrent duplicates -> 8 answered; first: {"build_id":"2:5","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":68267008,"created":false,"cpu_build_ms":13269,"gpu_total_ms":3710}
+    load_test.go:214: [api] after the duplicates: build_id=2:5 placement=gpu state=leased attempt=1 lease_owner=77a199e04415 finished_at=<nil> n_vectors=66667
+    load_test.go:220: [api] a NEW shard 99 into the full round -> 409 {"error":"round already has n_shards builds"}
+    load_test.go:225: [api] round 5 stamped finished_at=04:58:09.412 (15.02s after start)
+    load_test.go:225: [shards] time=2026-10-06T04:58:09.428Z level=INFO msg="round finished" round_id=5 duration=15.019s duration_modeled=30.038s straggler_lag=17ms builds_gpu=6 builds_local=0 queries=3598
+    load_test.go:225: [shards] round 5  scenario=skewed seed=5  time_scale=2 | duration 15.0s real (30.0s modeled)   straggler lag 0.0s   builds: 6 gpu, 0 local   queries: 3598
+    load_test.go:225: [timeline] shard 0 n_vectors=33333 place=gpu att=1 b.done=5.7s finish=15.0s queries=587 max_wait=6.0s
+    load_test.go:225: [timeline] shard 1 n_vectors=50000 place=gpu att=1 b.done=7.4s finish=15.0s queries=596 max_wait=7.4s
+    load_test.go:225: [timeline] shard 2 n_vectors=66667 place=gpu att=1 b.done=2.2s finish=15.0s queries=622 max_wait=2.4s
+    load_test.go:225: [timeline] shard 3 n_vectors=100000 place=gpu att=1 b.done=2.8s finish=15.0s queries=614 max_wait=3.0s
+    load_test.go:225: [timeline] shard 4 n_vectors=40000 place=gpu att=1 b.done=4.3s finish=15.0s queries=578 max_wait=4.4s
+    load_test.go:225: [timeline] shard 5 n_vectors=200000 place=gpu att=1 b.done=6.0s finish=15.0s queries=601 max_wait=5.9s
+    load_test.go:225: [verify] round 5 complete and correct: 6 builds done once each, 3598 queries finished, stamped at the latest child finish
+    load_test.go:237: [api] duplicate after the round finished -> 200 {"build_id":"2:5","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":68267008,"created":false,"cpu_build_ms":13269,"gpu_total_ms":3710}
+--- PASS: TestLoadDuplicateSubmitDuringRound (16.22s)
+=== RUN   TestLoadLargestBuildKilledTwiceReachesAttempt3
+    load_test.go:253: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up About a minute; kgpu-xcheck-worker-1(77a199e04415):Up About a minute; kgpu-xcheck-worker-2(d67e306f9733):Up About a minute; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 31 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up About a minute (healthy)
+    load_test.go:254: [api] fresh round 6 started at 04:58:10.443 with 6 builds submitted
+    load_test.go:256: [setup] round 6: largest build 0:6 n_vectors=200000 (shard 0)
+    load_test.go:260: [inject] crash 1: build_id=0:6 placement=gpu state=leased attempt=1 lease_owner=77a199e04415 finished_at=<nil> held by kgpu-xcheck-worker-1
+    load_test.go:261: [docker] SIGKILL python inside kgpu-xcheck-worker-1 (exec err=<nil> ) in 0.04s
+    load_test.go:261: [docker] kgpu-xcheck-worker-1 restarted by policy: RestartCount 0 -> 1, 0.1s after the kill
+    load_test.go:263: [api] +0.0s build_id=0:6 placement=gpu state=leased attempt=1 lease_owner=77a199e04415 finished_at=<nil>
+    load_test.go:263: [api] +5.4s build_id=0:6 placement=gpu state=queued attempt=1 lease_owner=<nil> finished_at=<nil>
+    load_test.go:263: [api] +5.5s build_id=0:6 placement=gpu state=leased attempt=2 lease_owner=77a199e04415 finished_at=<nil>
+    load_test.go:267: [inject] crash 2: build_id=0:6 placement=gpu state=leased attempt=2 lease_owner=77a199e04415 finished_at=<nil> held by kgpu-xcheck-worker-1 (the same container, restarted)
+    load_test.go:268: [docker] SIGKILL python inside kgpu-xcheck-worker-1 (exec err=<nil> ) in 0.03s
+    load_test.go:268: [docker] kgpu-xcheck-worker-1 restarted by policy: RestartCount 1 -> 2, 0.1s after the kill
+    load_test.go:270: [api] +0.0s build_id=0:6 placement=gpu state=leased attempt=2 lease_owner=77a199e04415 finished_at=<nil>
+    load_test.go:270: [api] +5.7s build_id=0:6 placement=gpu state=queued attempt=2 lease_owner=<nil> finished_at=<nil>
+    load_test.go:270: [api] +5.8s build_id=0:6 placement=gpu state=leased attempt=3 lease_owner=77a199e04415 finished_at=<nil>
+    load_test.go:270: [api] +9.6s build_id=0:6 placement=gpu state=done attempt=3 lease_owner=<nil> finished_at=04:58:26.360
+    load_test.go:276: [scheduler] time=2026-10-06T04:58:16.412Z level=WARN msg="lease expired, build back to queued" build_id=0:6 round_id=6 attempt=1 lease_owner=77a199e04415
+    load_test.go:276: [scheduler] time=2026-10-06T04:58:22.412Z level=WARN msg="lease expired, build back to queued" build_id=0:6 round_id=6 attempt=2 lease_owner=77a199e04415
+    load_test.go:285: [api] round 6 stamped finished_at=04:58:30.532 (20.09s after start)
+    load_test.go:285: [finding] shard 0's last stored report: stream_done=true queue_depth=7 waiting_needs_index=7 although every query finished
+    load_test.go:285: [shards] time=2026-10-06T04:58:30.979Z level=INFO msg="round finished" round_id=6 duration=20.089s duration_modeled=40.177s straggler_lag=5.087s builds_gpu=6 builds_local=0 queries=3578
+    load_test.go:285: [shards] round 6  scenario=skewed seed=6  time_scale=2 | duration 20.1s real (40.2s modeled)   straggler lag 5.1s   builds: 6 gpu, 0 local   queries: 3578
+    load_test.go:285: [timeline] shard 0 n_vectors=200000 place=gpu att=3 b.done=15.9s finish=20.1s queries=597 max_wait=16.0s
+    load_test.go:285: [timeline] shard 1 n_vectors=100000 place=gpu att=1 b.done=6.1s finish=15.0s queries=623 max_wait=6.4s
+    load_test.go:285: [timeline] shard 2 n_vectors=50000 place=gpu att=1 b.done=3.8s finish=15.0s queries=602 max_wait=3.9s
+    load_test.go:285: [timeline] shard 3 n_vectors=40000 place=gpu att=1 b.done=2.3s finish=15.0s queries=571 max_wait=2.3s
+    load_test.go:285: [timeline] shard 4 n_vectors=33333 place=gpu att=1 b.done=3.8s finish=15.0s queries=584 max_wait=4.0s
+    load_test.go:285: [timeline] shard 5 n_vectors=66667 place=gpu att=1 b.done=2.2s finish=15.0s queries=601 max_wait=2.4s
+    load_test.go:285: [verify] round 6 complete and correct: 6 builds done once each, 3578 queries finished, stamped at the latest child finish
+    load_test.go:287: [shards] time=2026-10-06T04:58:10.450Z level=INFO msg=submitted round_id=6 shard_id=0 build_id=0:6 placement=gpu reason=always_gpu n_vectors=200000 attempt=0
+    load_test.go:287: [shards] time=2026-10-06T04:58:10.951Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=leased attempt=1
+    load_test.go:287: [shards] time=2026-10-06T04:58:16.453Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=queued attempt=1
+    load_test.go:287: [shards] time=2026-10-06T04:58:16.950Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=leased attempt=2
+    load_test.go:287: [shards] time=2026-10-06T04:58:22.451Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=queued attempt=2
+    load_test.go:287: [shards] time=2026-10-06T04:58:22.951Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=leased attempt=3
+    load_test.go:287: [shards] time=2026-10-06T04:58:26.452Z level=INFO msg="index ready" round_id=6 shard_id=0 build_id=0:6 attempt=3 placement=gpu
+    load_test.go:287: [shards] time=2026-10-06T04:58:26.452Z level=INFO msg="build state" round_id=6 shard_id=0 build_id=0:6 placement=gpu state=done attempt=3
+    load_test.go:303: [timeline] duration 20.1s real (40.2s modeled)   straggler lag 5.1s   builds: 6 gpu, 0 local   queries: 3578
+    load_test.go:322: [verify] round lasted 20.1s real; the twice-crashed shard 0 finished at 20.1s and set it
+--- PASS: TestLoadLargestBuildKilledTwiceReachesAttempt3 (21.43s)
+=== RUN   TestLoadPostgresRestartMidRound
+    load_test.go:335: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up About a minute; kgpu-xcheck-worker-1(77a199e04415):Up 14 seconds; kgpu-xcheck-worker-2(d67e306f9733):Up About a minute; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up 52 seconds (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up About a minute (healthy)
+    load_test.go:336: [api] fresh round 7 started at 04:58:32.001 with 6 builds submitted
+    load_test.go:343: [inject] round 7 mid-flight (build_id=5:7 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil>); restarting postgres
+    load_test.go:344: [docker] compose -p kgpu-xcheck restart postgres (0.3s)
+    load_test.go:347: [api] round 7 stamped finished_at=04:58:47.033 (15.03s after start)
+    load_test.go:347: [finding] shard 5's last stored report: stream_done=true queue_depth=1 waiting_needs_index=0 although every query finished
+    load_test.go:347: [shards] time=2026-10-06T04:58:47.534Z level=INFO msg="round finished" round_id=7 duration=15.032s duration_modeled=30.064s straggler_lag=18ms builds_gpu=6 builds_local=0 queries=3617
+    load_test.go:347: [shards] round 7  scenario=skewed seed=7  time_scale=2 | duration 15.0s real (30.1s modeled)   straggler lag 0.0s   builds: 6 gpu, 0 local   queries: 3617
+    load_test.go:347: [timeline] shard 0 n_vectors=33333 place=gpu att=1 b.done=4.0s finish=15.0s queries=616 max_wait=4.5s
+    load_test.go:347: [timeline] shard 1 n_vectors=40000 place=gpu att=1 b.done=7.3s finish=15.0s queries=596 max_wait=7.4s
+    load_test.go:347: [timeline] shard 2 n_vectors=200000 place=gpu att=1 b.done=4.2s finish=15.0s queries=609 max_wait=4.5s
+    load_test.go:347: [timeline] shard 3 n_vectors=50000 place=gpu att=1 b.done=5.8s finish=15.0s queries=608 max_wait=6.0s
+    load_test.go:347: [timeline] shard 4 n_vectors=66667 place=gpu att=1 b.done=5.9s finish=15.0s queries=582 max_wait=5.9s
+    load_test.go:347: [timeline] shard 5 n_vectors=100000 place=gpu att=1 b.done=2.6s finish=15.0s queries=606 max_wait=3.0s
+    load_test.go:347: [verify] round 7 complete and correct: 6 builds done once each, 3617 queries finished, stamped at the latest child finish
+    load_test.go:354: [docker] scheduler RestartCount 0 -> 0 across the Postgres restart (not a spec promise in Phase 1)
+--- PASS: TestLoadPostgresRestartMidRound (16.64s)
+=== RUN   TestLoadDockerStopLeaseholderMidRound
+    load_test.go:370: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up 2 minutes; kgpu-xcheck-worker-1(77a199e04415):Up 31 seconds; kgpu-xcheck-worker-2(d67e306f9733):Up About a minute; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up About a minute (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up 15 seconds (healthy)
+    load_test.go:371: [api] fresh round 8 started at 04:58:48.554 with 6 builds submitted
+    load_test.go:376: [inject] round 8: build_id=2:8 placement=gpu state=leased attempt=1 lease_owner=d67e306f9733 finished_at=<nil> held by kgpu-xcheck-worker-2; docker stop (SIGTERM, 15 s grace)
+    load_test.go:379: [docker] kgpu-xcheck-worker-2 stopped in 3.8s, exit code 0
+    load_test.go:382: [api] /workers right after the stop: [77a199e04415]
+    load_test.go:389: [api] build_id=2:8 placement=gpu state=done attempt=1 lease_owner=<nil> finished_at=04:58:52.664 after the stop
+    load_test.go:399: [log kgpu-xcheck-worker-2] 04:58:48.900 INFO  claimed build_id=2:8 attempt=1 round_id=8 n_vectors=200000 dim=128 estimate_s=3.76
+    load_test.go:399: [log kgpu-xcheck-worker-2] 04:58:48.965 INFO  finishing current build before exit build_id=2:8 attempt=1 round_id=8 remaining_s=3.76 budget_s=5.0
+    load_test.go:399: [log kgpu-xcheck-worker-2] 04:58:52.665 INFO  completed build_id=2:8 attempt=1 round_id=8 kind=fake index_bytes=128000000 elapsed_s=3.76
+    load_test.go:406: [api] round 8 stamped finished_at=04:59:03.596 (15.04s after start)
+    load_test.go:406: [finding] shard 2's last stored report: stream_done=true queue_depth=2 waiting_needs_index=2 although every query finished
+    load_test.go:406: [shards] time=2026-10-06T04:59:04.099Z level=INFO msg="round finished" round_id=8 duration=15.041s duration_modeled=30.082s straggler_lag=28ms builds_gpu=6 builds_local=0 queries=3487
+    load_test.go:406: [shards] round 8  scenario=skewed seed=8  time_scale=2 | duration 15.0s real (30.1s modeled)   straggler lag 0.0s   builds: 6 gpu, 0 local   queries: 3487
+    load_test.go:406: [timeline] shard 0 n_vectors=40000 place=gpu att=1 b.done=3.6s finish=15.0s queries=574 max_wait=4.0s
+    load_test.go:406: [timeline] shard 1 n_vectors=50000 place=gpu att=1 b.done=9.0s finish=15.0s queries=616 max_wait=8.9s
+    load_test.go:406: [timeline] shard 2 n_vectors=200000 place=gpu att=1 b.done=4.1s finish=15.0s queries=570 max_wait=4.4s
+    load_test.go:406: [timeline] shard 3 n_vectors=100000 place=gpu att=1 b.done=5.9s finish=15.0s queries=578 max_wait=5.9s
+    load_test.go:406: [timeline] shard 4 n_vectors=33333 place=gpu att=1 b.done=7.3s finish=15.0s queries=577 max_wait=7.4s
+    load_test.go:406: [timeline] shard 5 n_vectors=66667 place=gpu att=1 b.done=2.1s finish=15.0s queries=572 max_wait=2.5s
+    load_test.go:406: [verify] round 8 complete and correct: 6 builds done once each, 3487 queries finished, stamped at the latest child finish
+    load_test.go:410: [cleanup] kgpu-xcheck-worker-2 started again; pool back to 2
+--- PASS: TestLoadDockerStopLeaseholderMidRound (16.71s)
+=== RUN   TestLoadFinalReportShowsEmptyBacklog
+    load_test.go:420: [setup] stack kgpu-xcheck: kgpu-xcheck-shards-1(3def771c0525):Up 2 minutes; kgpu-xcheck-worker-1(77a199e04415):Up 47 seconds; kgpu-xcheck-worker-2(d67e306f9733):Up Less than a second; kgpu-xcheck-scheduler-1(5c3cb0ce8a5a):Up About a minute (healthy); kgpu-xcheck-postgres-1(e9b7bf05da56):Up 32 seconds (healthy)
+    load_test.go:444: [verify] 8 stamped rounds audited, 0 shard rows left with a non-empty backlog
+--- PASS: TestLoadFinalReportShowsEmptyBacklog (0.19s)
+PASS
+compose down -v --remove-orphans (project kgpu-xcheck): err=<nil>
+ Volume kgpu-xcheck_timelines Removing 
+ Volume kgpu-xcheck_pgdata Removing 
+ Volume kgpu-xcheck_timelines Removed 
+ Volume kgpu-xcheck_pgdata Removed 
+ Network kgpu-xcheck_default Removed 
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/crosscheck	150.954s
+
+== Docker events for container kgpu-test-pg-82923
+  21:59:05  kill
+  21:59:05  die
+  21:59:05  destroy
+
+== Result: PASS

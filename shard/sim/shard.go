@@ -372,8 +372,13 @@ func (s *Shard) reportLocked() client.ReportRequest {
 func (s *Shard) apply(b client.BuildSummary) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prevPlacement, prevState := s.b.placement, s.b.state
+	prevPlacement, prevState, prevAttempt := s.b.placement, s.b.state, s.b.attempt
 	s.b.placement, s.b.state, s.b.attempt = b.Placement, b.State, b.Attempt
+	if b.Attempt != prevAttempt && prevAttempt > 0 {
+		// A requeue and re-claim can both happen between two reports, so the
+		// attempt counter is the only sure sign of a recovery (cross-check gap).
+		s.event("build attempt %d -> %d: the previous attempt was lost and the build re-claimed", prevAttempt, b.Attempt)
+	}
 	switch {
 	case b.State == "done" && !s.b.indexReady:
 		s.b.indexReady = true
@@ -392,7 +397,7 @@ func (s *Shard) apply(b client.BuildSummary) {
 		}
 		s.b.localWant = true
 	}
-	if prevPlacement != b.Placement || prevState != b.State {
+	if prevPlacement != b.Placement || prevState != b.State || prevAttempt != b.Attempt {
 		s.log.Info("build state", "placement", b.Placement, "state", b.State, "attempt", b.Attempt)
 	}
 }
