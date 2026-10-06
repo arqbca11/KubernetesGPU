@@ -537,6 +537,26 @@ A fresh agent brought up its own stack with the simulator running continuous rou
 A harness lesson from the 50-shard run, recorded in the study notes: `docker logs | grep -q` under `set -o pipefail` reports failure when the log is large, because `grep -q` exits at the first match and `docker logs` gets a broken pipe. Three checks had that shape; one would have failed falsely and two would have passed falsely.
 
 
+## Cost model v0 against published numbers (2026-10-06)
+
+Collected to set Phase 4's calibration target; see the roadmap's Phase 4. Build times for HNSW, dimension as stated.
+
+| Source | Vectors x dims | Hardware | CPU build | GPU build |
+| --- | --- | --- | --- | --- |
+| OpenSearch k-NN RFC #2293 | 1M x 128 | 8 vCPU (r6g.2xlarge) | 490 s | 17 s (g5.2xlarge, one A10G) |
+| same | 5M x 1536 | same | 5,647 s | 181 s |
+| same | 10M x 128 | same | 9,489 s | 227 s |
+| GSI Technology whitepaper | 100M | Xeon Platinum 8480CL | 5,636 s | |
+| GSI, citing eBay | 160M | production | 3 to 6 h | |
+| NVIDIA / Spheron | 50M | 32-core CPU | 8 to 12 h | under 30 min (H100) |
+| Oracle Vector Index Service blog | not stated | OCI dbfree VM | 24 to 40 min | 76 to 138 s |
+| Amazon OpenSearch Service | 1B x 128 | 10 GPU workers | more than 24 h on CPUs | 35.5 min |
+| Amazon OpenSearch Service | 1B x 1024 | 10 GPU workers | | 274 min |
+
+Index size: Oracle's sizing rule is 1.3 x vectors x dims x 4 bytes (2 GB for 1M x 384); billion-scale builds produced 492 and 612 GB indexes with peak RSS near 900 GB.
+
+Against cost model v0 (decision 20): the n log n shape holds; the CPU constant is 2 to 3x optimistic (model 4.1 min vs measured 8.2 min for 1M x 128 on 8 vCPUs; 46 min vs 158 min for 10M); the GPU speedup of 10 is conservative against 30 to 49x for the build step alone and matches the 9.3x end-to-end service figure; the index size of 640 bytes per 128-dim vector is within a few percent of Oracle's rule (666); the GPU memory factor of 2 has no published backing. Production shard sizes are 1 to 10M vectors, 10 to 100x the fake workload's.
+
 ## Open questions
 
 - **A failed GPU build and a waiting `needs_index` job.** `FinishCompleteRounds` treats `failed` as terminal, but the shard's job that needs the index can never start, so the round stays open forever. Resubmitting is a no-op by design. Candidates: the scheduler re-places a failed GPU build as local; or the shard marks dependent jobs skipped; or failed builds are retried once on the GPU. Decide in Phase 4, when the recall gate makes failure real. Raised by the cross-check.
