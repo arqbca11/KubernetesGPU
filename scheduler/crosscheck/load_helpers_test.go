@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/arqbca11/KubernetesGPU/experiments/workload"
 )
 
 // The environment the task prescribes for this run.
@@ -48,8 +50,43 @@ const (
 	ldShardsName    = xcProject + "-shards-1"
 	ldSchedulerName = xcProject + "-scheduler-1"
 	ldPostgresName  = xcProject + "-postgres-1"
-	ldNShards       = 6
+	ldTimeScale     = 2.0 // FAKE_TIME_SCALE above
 )
+
+// The stack size is parametrised for the step 7 phase-boundary run:
+// KGPU_XCHECK_SHARDS (default 6) and KGPU_XCHECK_WORKERS (default 2). At the
+// defaults every setting and deadline is what the step 6 cross-check used.
+var (
+	ldNShards  = envInt("KGPU_XCHECK_SHARDS", 6)
+	ldNWorkers = envInt("KGPU_XCHECK_WORKERS", 2)
+)
+
+func envInt(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		panic(fmt.Sprintf("%s=%q: want a positive integer", name, v))
+	}
+	return n
+}
+
+func init() {
+	ldEnv["N_SHARDS"] = strconv.Itoa(ldNShards)
+	ldEnv["MIN_WORKERS"] = strconv.Itoa(ldNWorkers)
+}
+
+// ldScaled stretches a step 6 deadline for a bigger stack: a 6-shard round
+// takes about 15 s real, a 50-shard round about 25 to 30 s, and recovery waits
+// sit behind a longer GPU queue. At 6 shards it returns d unchanged.
+func ldScaled(d time.Duration) time.Duration {
+	if ldNShards <= 6 {
+		return d
+	}
+	return d * 3 / 2
+}
 
 var (
 	ldOnce sync.Once
@@ -81,7 +118,7 @@ func ldCompose(t *testing.T, args ...string) string {
 
 // requireLoadStack skips unless KGPU_COMPOSE=1. The first call wipes any
 // leftover xcheck project and brings up a fresh stack with the load settings;
-// every call then checks the baseline: scheduler healthy, two live workers,
+// every call then checks the baseline: scheduler healthy, ldNWorkers live workers,
 // the simulator still running (its restart policy is "no", so a dead
 // simulator must not be silently restarted by `up`).
 func requireLoadStack(t *testing.T) {
@@ -92,7 +129,11 @@ func requireLoadStack(t *testing.T) {
 	ldOnce.Do(func() {
 		stackUp = true // TestMain tears down even if up fails half way
 		_ = ldComposeCmd("down", "-v", "--remove-orphans").Run()
-		out, err := ldComposeCmd("up", "-d", "--build", "--wait").CombinedOutput()
+		args := []string{"up", "-d", "--build", "--wait"}
+		if ldNWorkers != 2 {
+			args = append(args, "--scale", "worker="+strconv.Itoa(ldNWorkers))
+		}
+		out, err := ldComposeCmd(args...).CombinedOutput()
 		if err != nil {
 			ldErr = fmt.Errorf("compose up: %v\n%s", err, out)
 		}
@@ -113,8 +154,8 @@ func requireLoadStack(t *testing.T) {
 		}
 	}
 	waitHealthy(t, 60*time.Second)
-	waitLiveWorkers(t, 2, 30*time.Second)
-	t.Logf("[setup] stack %s: %s", xcProject, psSummary(t))
+	waitLiveWorkers(t, ldNWorkers, 30*time.Second)
+	t.Logf("[setup] stack %s (%d shards, %d workers): %s", xcProject, ldNShards, ldNWorkers, psSummary(t))
 }
 
 func ldInspect(t *testing.T, name, format string) string {
@@ -164,6 +205,8 @@ type ldStatus struct {
 type ldRound struct {
 	Round struct {
 		RoundID    int64      `json:"round_id"`
+		Scenario   string     `json:"scenario"`
+		Seed       int64      `json:"seed"`
 		NShards    int        `json:"n_shards"`
 		StartedAt  time.Time  `json:"started_at"`
 		FinishedAt *time.Time `json:"finished_at"`
@@ -460,6 +503,10 @@ type ldVerify struct {
 //   - every recorded query has started and finished, in order, and no
 //     needs_index query started before its shard's build was done
 //     (decision 32);
+//   - the recorded queries are exactly the seeded workload's: every query of
+//     every shard, including those that arrived before the shard's DDL
+//     (decision 59, backfilled), in arrival order, with its needs_index and
+//     modeled duration, and arrived on schedule (ldCheckWorkload);
 //   - every shard reported stream_done with an empty queue (decision 30);
 //   - the simulator logged "round finished" with the same query count and
 //     printed a timeline whose attempt column matches Postgres; it logged no
@@ -556,6 +603,10 @@ func verifyRound(t *testing.T, round int64, d time.Duration) ldVerify {
 		t.Errorf("round finished_at %s is not the latest child finish %s (decision 18)", fin.Format(time.RFC3339Nano), latest.Format(time.RFC3339Nano))
 	}
 
+	// Every recorded query against the seeded workload (invariant 10,
+	// decisions 59 and 60).
+	ldCheckWorkload(t, r)
+
 	// Shard status.
 	if len(r.ShardStatus) != r.Round.NShards {
 		t.Errorf("round %d: %d shard_status rows, want %d", round, len(r.ShardStatus), r.Round.NShards)
@@ -632,4 +683,94 @@ func workerIDs(t *testing.T) []string {
 		ids = append(ids, w.WorkerID)
 	}
 	return ids
+}
+
+// ldExpected regenerates the round's workload from the scenario and seed the
+// round row carries (invariant 10: workloads are seeded and reproducible).
+func ldExpected(t *testing.T, r ldRound) workload.Workload {
+	t.Helper()
+	sc, err := workload.PresetWithShards(r.Round.Scenario, r.Round.NShards)
+	if err != nil {
+		t.Fatalf("PresetWithShards(%q, %d): %v", r.Round.Scenario, r.Round.NShards, err)
+	}
+	w := workload.Generate(sc, r.Round.Seed)
+	if err := w.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	return w
+}
+
+// ldJobsByShard groups a round's jobs by shard, sorted by seq.
+func ldJobsByShard(r ldRound) map[int32][]ldJob {
+	m := map[int32][]ldJob{}
+	for _, j := range r.Jobs {
+		m[j.ShardID] = append(m[j.ShardID], j)
+	}
+	for k := range m {
+		sort.Slice(m[k], func(a, b int) bool { return m[k][a].Seq < m[k][b].Seq })
+	}
+	return m
+}
+
+// ldCheckWorkload compares every recorded query with the workload the
+// simulator replays. Decision 59 (step 7): arrivals start at round start and
+// pre-DDL queries are backfilled, so every query of every shard must be in
+// shard_jobs, in arrival order (seq), with the workload's needs_index and
+// duration (duration_ms within 1 ms of the modeled duration), and its
+// arrived_at at round start + arrival offset / time scale. The arrival check
+// is loose (late by at most 500 ms, early by at most 100 ms): the round row's
+// started_at is the scheduler's clock and the arrivals are the shard's
+// (decision 60), one machine here.
+func ldCheckWorkload(t *testing.T, r ldRound) {
+	t.Helper()
+	w := ldExpected(t, r)
+	got := ldJobsByShard(r)
+	total, mism, late, early := 0, 0, 0, 0
+	var worstLate, worstEarly time.Duration
+	for _, s := range w.Shards {
+		total += len(s.Queries)
+		js := got[s.ShardID]
+		if len(js) != len(s.Queries) {
+			t.Errorf("round %d shard %d: %d queries recorded, the workload (%s seed %d) has %d (%d before the DDL at %v, which decision 59 backfills)",
+				r.Round.RoundID, s.ShardID, len(js), r.Round.Scenario, r.Round.Seed, len(s.Queries), len(s.Queries)-len(postDDL(s)), s.DDLOffset)
+			continue
+		}
+		for i, j := range js {
+			q := s.Queries[i]
+			dm := q.Duration.Milliseconds()
+			if j.NeedsIndex != q.NeedsIndex || j.DurationMs < dm-1 || j.DurationMs > dm+1 {
+				mism++
+				if mism <= 3 {
+					t.Errorf("round %d shard %d seq %d (arrival #%d): recorded needs_index=%v duration_ms=%d, workload needs_index=%v duration=%v",
+						r.Round.RoundID, s.ShardID, j.Seq, i, j.NeedsIndex, j.DurationMs, q.NeedsIndex, q.Duration)
+				}
+			}
+			want := r.Round.StartedAt.Add(time.Duration(float64(q.Arrival) / ldTimeScale))
+			d := j.ArrivedAt.Sub(want)
+			if d > worstLate {
+				worstLate = d
+			}
+			if d < worstEarly {
+				worstEarly = d
+			}
+			if d > 500*time.Millisecond {
+				late++
+			}
+			if d < -100*time.Millisecond {
+				early++
+			}
+		}
+	}
+	if len(r.Jobs) != total {
+		t.Errorf("round %d: %d queries recorded, the workload has %d", r.Round.RoundID, len(r.Jobs), total)
+	}
+	if mism > 0 {
+		t.Errorf("round %d: %d recorded queries disagree with the workload in arrival order", r.Round.RoundID, mism)
+	}
+	if late > 0 || early > 0 {
+		t.Errorf("round %d: %d queries arrived >500 ms late and %d >100 ms early against round start + offset/scale (worst %+.3fs / %+.3fs)",
+			r.Round.RoundID, late, early, worstLate.Seconds(), worstEarly.Seconds())
+	}
+	t.Logf("[workload] round %d (%s seed %d): %d recorded queries vs %d in the workload, %d field mismatches; arrival vs schedule worst late %+.3fs, worst early %+.3fs",
+		r.Round.RoundID, r.Round.Scenario, r.Round.Seed, len(r.Jobs), total, mism, worstLate.Seconds(), worstEarly.Seconds())
 }
