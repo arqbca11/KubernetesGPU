@@ -1,0 +1,63 @@
+
+== Phase 1 step 6: failure tests under simulator load  (2026-10-05 23:31:07 PDT, commit f7e3866)
+   scenario=skewed shards=50 workers=3 time_scale=2 lease=5s renew=1s; the simulator runs rounds continuously
+
+== 0. Bring the stack up; the simulator starts its first round
+    Container kgpu-scheduler-1 Started 
+    Container kgpu-worker-1 Started 
+    Container kgpu-worker-2 Started 
+    Container kgpu-shards-1 Started 
+    Container kgpu-worker-3 Started 
+   round 1 exists; letting it run to completion as a baseline
+   round 1: finished_at=2026-10-06T06:31:44.468345Z; builds: 0:1=gpu/done@1, 1:1=gpu/done@1, 2:1=gpu/done@1, 3:1=gpu/done@1, 4:1=gpu/done@1, 5:1=gpu/done@1, 6:1=gpu/done@1, 7:1=gpu/done@1, 8:1=gpu/done@1, 9:1=gpu/done@1, 10:1=gpu/done@1, 11:1=gpu/done@1, 12:1=gpu/done@1, 13:1=gpu/done@1, 14:1=gpu/done@1, 15:1=gpu/done@1, 16:1=gpu/done@1, 17:1=gpu/done@1, 18:1=gpu/done@1, 19:1=gpu/done@1, 20:1=gpu/done@1, 21:1=gpu/done@1, 22:1=gpu/done@1, 23:1=gpu/done@1, 24:1=gpu/done@1, 25:1=gpu/done@1, 26:1=gpu/done@1, 27:1=gpu/done@1, 28:1=gpu/done@1, 29:1=gpu/done@1, 30:1=gpu/done@1, 31:1=gpu/done@1, 32:1=gpu/done@1, 33:1=gpu/done@1, 34:1=gpu/done@1, 35:1=gpu/done@1, 36:1=gpu/done@1, 37:1=gpu/done@1, 38:1=gpu/done@1, 39:1=gpu/done@1, 40:1=gpu/done@1, 41:1=gpu/done@1, 42:1=gpu/done@1, 43:1=gpu/done@1, 44:1=gpu/done@1, 45:1=gpu/done@1, 46:1=gpu/done@1, 47:1=gpu/done@1, 48:1=gpu/done@1, 49:1=gpu/done@1
+   round 1: queries recorded=29934 unfinished=0
+   | timeline: 0      18182     gpu    1    0.0s     18.2s    19.4s    22.8s    607     19.5s    #########################
+
+== 1. Crash the worker holding a lease, mid-build, during a round
+   round 2 started
+   build 18:2 leased to a1b63ce67b4b (kgpu-worker-1); crashing its process now (0.3 s in)
+   round 2: finished_at=2026-10-06T06:32:11.743792Z; builds: 0:2=gpu/done@1, 1:2=gpu/done@1, 2:2=gpu/done@1, 3:2=gpu/done@1, 4:2=gpu/done@1, 5:2=gpu/done@1, 6:2=gpu/done@1, 7:2=gpu/done@1, 8:2=gpu/done@1, 9:2=gpu/done@1, 10:2=gpu/done@1, 11:2=gpu/done@1, 12:2=gpu/done@1, 13:2=gpu/done@1, 14:2=gpu/done@1, 15:2=gpu/done@1, 16:2=gpu/done@1, 17:2=gpu/done@1, 18:2=gpu/done@2, 19:2=gpu/done@1, 20:2=gpu/done@1, 21:2=gpu/done@1, 22:2=gpu/done@1, 23:2=gpu/done@1, 24:2=gpu/done@1, 25:2=gpu/done@1, 26:2=gpu/done@1, 27:2=gpu/done@1, 28:2=gpu/done@1, 29:2=gpu/done@1, 30:2=gpu/done@1, 31:2=gpu/done@1, 32:2=gpu/done@1, 33:2=gpu/done@1, 34:2=gpu/done@1, 35:2=gpu/done@1, 36:2=gpu/done@1, 37:2=gpu/done@1, 38:2=gpu/done@1, 39:2=gpu/done@1, 40:2=gpu/done@1, 41:2=gpu/done@1, 42:2=gpu/done@1, 43:2=gpu/done@1, 44:2=gpu/done@1, 45:2=gpu/done@1, 46:2=gpu/done@1, 47:2=gpu/done@1, 48:2=gpu/done@1, 49:2=gpu/done@1
+   round 2: queries recorded=30388 unfinished=0
+   18:2: attempt 2, completed exactly once; the shard's view:
+   | shard: level=INFO msg=submitted round_id=2 shard_id=18 build_id=18:2 placement=gpu reason=always_gpu n_vectors=20000 attempt=0 pre_ddl_records=1
+   | shard: level=INFO msg="build state" round_id=2 shard_id=18 build_id=18:2 placement=gpu state=leased attempt=1
+   | shard: level=INFO msg="build state" round_id=2 shard_id=18 build_id=18:2 placement=gpu state=queued attempt=1
+   | shard: level=INFO msg="build state" round_id=2 shard_id=18 build_id=18:2 placement=gpu state=leased attempt=2
+   | shard: level=INFO msg="index ready" round_id=2 shard_id=18 build_id=18:2 attempt=2 placement=gpu
+   | shard: level=INFO msg="build state" round_id=2 shard_id=18 build_id=18:2 placement=gpu state=done attempt=2
+   | timeline: 18     20000     gpu    2    0.0s     6.0s     7.3s     15.0s    591     7.5s     #################
+   pool back to 3 live workers
+
+== 2. Pause the worker holding a lease past its lease, then unpause, during a round
+   round 3 started
+   build 20:3 leased to 49c8f279c67d (kgpu-worker-3); pausing for 8 s
+   unpaused
+   round 3: finished_at=2026-10-06T06:32:41.224351Z; builds: 0:3=gpu/done@1, 1:3=gpu/done@1, 2:3=gpu/done@1, 3:3=gpu/done@1, 4:3=gpu/done@1, 5:3=gpu/done@1, 6:3=gpu/done@1, 7:3=gpu/done@1, 8:3=gpu/done@1, 9:3=gpu/done@1, 10:3=gpu/done@1, 11:3=gpu/done@1, 12:3=gpu/done@1, 13:3=gpu/done@1, 14:3=gpu/done@1, 15:3=gpu/done@1, 16:3=gpu/done@1, 17:3=gpu/done@1, 18:3=gpu/done@1, 19:3=gpu/done@1, 20:3=gpu/done@2, 21:3=gpu/done@1, 22:3=gpu/done@1, 23:3=gpu/done@1, 24:3=gpu/done@1, 25:3=gpu/done@1, 26:3=gpu/done@1, 27:3=gpu/done@1, 28:3=gpu/done@1, 29:3=gpu/done@1, 30:3=gpu/done@1, 31:3=gpu/done@1, 32:3=gpu/done@1, 33:3=gpu/done@1, 34:3=gpu/done@1, 35:3=gpu/done@1, 36:3=gpu/done@1, 37:3=gpu/done@1, 38:3=gpu/done@1, 39:3=gpu/done@1, 40:3=gpu/done@1, 41:3=gpu/done@1, 42:3=gpu/done@1, 43:3=gpu/done@1, 44:3=gpu/done@1, 45:3=gpu/done@1, 46:3=gpu/done@1, 47:3=gpu/done@1, 48:3=gpu/done@1, 49:3=gpu/done@1
+   round 3: queries recorded=28865 unfinished=0
+   20:3: attempt 2, completed exactly once; the paused worker logged lost ownership for attempt 1:
+   | worker: 06:32:21.810 WARNING renew rejected: lease lost, cancelling build build_id=20:3 attempt=1 round_id=3
+   | worker: 06:32:21.810 WARNING lost ownership build_id=20:3 attempt=1 round_id=3 why=lease was lost during the build; not completing
+   | timeline: 20     10000     gpu    2    0.0s     5.8s     6.9s     15.0s    552     7.0s     ################
+
+== 3. Restart the scheduler mid-round; shards retry their calls (decision 61)
+   round 4 started
+   restarting the scheduler now
+   scheduler back
+   round 4: finished_at=2026-10-06T06:33:08.52401Z; builds: 0:4=gpu/done@1, 1:4=gpu/done@1, 2:4=gpu/done@1, 3:4=gpu/done@1, 4:4=gpu/done@1, 5:4=gpu/done@1, 6:4=gpu/done@1, 7:4=gpu/done@1, 8:4=gpu/done@1, 9:4=gpu/done@1, 10:4=gpu/done@1, 11:4=gpu/done@1, 12:4=gpu/done@1, 13:4=gpu/done@1, 14:4=gpu/done@1, 15:4=gpu/done@1, 16:4=gpu/done@1, 17:4=gpu/done@1, 18:4=gpu/done@1, 19:4=gpu/done@1, 20:4=gpu/done@1, 21:4=gpu/done@1, 22:4=gpu/done@1, 23:4=gpu/done@1, 24:4=gpu/done@1, 25:4=gpu/done@1, 26:4=gpu/done@1, 27:4=gpu/done@1, 28:4=gpu/done@1, 29:4=gpu/done@1, 30:4=gpu/done@1, 31:4=gpu/done@1, 32:4=gpu/done@1, 33:4=gpu/done@1, 34:4=gpu/done@1, 35:4=gpu/done@1, 36:4=gpu/done@1, 37:4=gpu/done@1, 38:4=gpu/done@1, 39:4=gpu/done@1, 40:4=gpu/done@1, 41:4=gpu/done@1, 42:4=gpu/done@1, 43:4=gpu/done@1, 44:4=gpu/done@1, 45:4=gpu/done@1, 46:4=gpu/done@1, 47:4=gpu/done@1, 48:4=gpu/done@1, 49:4=gpu/done@1
+   round 4: queries recorded=31150 unfinished=0
+   shard client: 31 retried calls, 31 succeeded after retries, no shard failed
+   all builds at attempt 1 (workers never noticed)
+
+== 4. Duplicate submit through the real API during a round
+   round 5 started
+   resubmit of 0:5 with a different body -> {"build_id":"0:5","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision retur
+   round 5: finished_at=2026-10-06T06:33:34.90346Z; builds: 0:5=gpu/done@1, 1:5=gpu/done@1, 2:5=gpu/done@1, 3:5=gpu/done@1, 4:5=gpu/done@1, 5:5=gpu/done@1, 6:5=gpu/done@1, 7:5=gpu/done@1, 8:5=gpu/done@1, 9:5=gpu/done@1, 10:5=gpu/done@1, 11:5=gpu/done@1, 12:5=gpu/done@1, 13:5=gpu/done@1, 14:5=gpu/done@1, 15:5=gpu/done@1, 16:5=gpu/done@1, 17:5=gpu/done@1, 18:5=gpu/done@1, 19:5=gpu/done@1, 20:5=gpu/done@1, 21:5=gpu/done@1, 22:5=gpu/done@1, 23:5=gpu/done@1, 24:5=gpu/done@1, 25:5=gpu/done@1, 26:5=gpu/done@1, 27:5=gpu/done@1, 28:5=gpu/done@1, 29:5=gpu/done@1, 30:5=gpu/done@1, 31:5=gpu/done@1, 32:5=gpu/done@1, 33:5=gpu/done@1, 34:5=gpu/done@1, 35:5=gpu/done@1, 36:5=gpu/done@1, 37:5=gpu/done@1, 38:5=gpu/done@1, 39:5=gpu/done@1, 40:5=gpu/done@1, 41:5=gpu/done@1, 42:5=gpu/done@1, 43:5=gpu/done@1, 44:5=gpu/done@1, 45:5=gpu/done@1, 46:5=gpu/done@1, 47:5=gpu/done@1, 48:5=gpu/done@1, 49:5=gpu/done@1
+   round 5: queries recorded=28537 unfinished=0
+
+== 5. Stop the simulator cleanly (SIGTERM via docker stop)
+   | shards: level=INFO msg="stopped by signal between rounds"
+   rounds run: 5
+
+== Result: PASS
+   stack removed (KEEP=1 keeps it)
+log: test-logs/phase1/step7-failures-load-50.log

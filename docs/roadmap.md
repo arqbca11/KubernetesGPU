@@ -75,7 +75,7 @@ Keep the worker's build step behind one interface (`build(job) -> artifact`) fro
 
 ## Phase 1: Scheduler with fake jobs
 
-Build a scheduler that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. Start at 6 shards and 2 workers. **Done when** a worker killed mid-job still results in that job finishing exactly once, at both 6 and 50 shards.
+Build a scheduler that stays correct under failures, using jobs that only sleep. Run everything locally with Docker Compose; no Kubernetes yet. Start at 6 shards and 2 workers. **Done when** a worker killed mid-job still results in that job finishing exactly once, at both 6 and 50 shards. **Done 2026-10-06**; the design as built is `docs/design/phase1-scheduler.md`.
 
 ### Fake jobs and cost model v0
 
@@ -189,13 +189,13 @@ RETURNING build_id, attempt, n_vectors, dim;
 - [x] Seeded workload generator with the scenario knobs: size distribution, query stream profile, DDL arrival pattern, pool size. Written by an independent agent against a fixed contract (`experiments/workload`); six presets; queries correlated through cluster-level fan-out.
 - [x] Docker Compose: Postgres, scheduler, 2 workers (shard simulator joins in the next step). 6 shards by default.
 - [x] Per-round timeline output: for each shard, the build (with any placement change) and each query's arrival, start and end; plus cluster-query latency as the slowest piece and the straggler lag
-- [ ] Scale to 50 shards and 3 workers by config, and rerun the failure tests
+- [x] Scale to 50 shards and 3 workers by config, and rerun the failure tests (batched client-timestamped reporting first, decisions 60 and 63)
 
 ### Failure tests
 
 - [x] `kill -9` a worker mid-job: the lease expires, another worker picks the job up, and it completes once *(Compose, step 4; under simulator load, step 6; at 50 shards in step 7)*
-- [x] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for. *(Compose, step 4; under load, step 6; step 7 pending)*
-- [x] Restart the scheduler mid-round: the round still completes, because all state is in Postgres *(Compose, step 4; under load with shard-side retries, step 6; step 7 pending)*
+- [x] `SIGSTOP` a worker until its lease expires, then `SIGCONT` it: its renew and complete are rejected. This is the paused-process case that fencing tokens exist for. *(Compose, step 4; under load, step 6; at 50 shards, step 7)*
+- [x] Restart the scheduler mid-round: the round still completes, because all state is in Postgres *(Compose, step 4; under load with shard-side retries, step 6; at 50 shards, step 7)*
 - [x] A shard resubmits the same build: the primary key makes it a no-op *(API level, steps 2, 4 and 6; the shard client's retry path relies on it)*
 
 ## Phase 2: Kubernetes on kind

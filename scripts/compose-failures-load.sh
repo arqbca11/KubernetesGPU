@@ -104,7 +104,7 @@ check_round "$R"
 ATT=$(round_json "$R" | jget "next(b['attempt'] for b in d['builds'] if b['build_id']=='$BID')")
 [ "$ATT" = 2 ] || fail "$BID should have finished at attempt 2 after the pause, got $ATT"
 [ "$(completions_of "$BID")" = 1 ] || fail "$BID completed $(completions_of "$BID") times"
-docker logs "$VICTIM" 2>&1 | grep -q "lost ownership build_id=$BID attempt=1" || fail "paused worker did not log lost ownership for attempt 1"
+[ "$(docker logs "$VICTIM" 2>&1 | grep -c "lost ownership build_id=$BID attempt=1")" -gt 0 ] || fail "paused worker did not log lost ownership for attempt 1"
 note "$BID: attempt $ATT, completed exactly once; the paused worker logged lost ownership for attempt 1:"
 docker logs "$VICTIM" 2>&1 | grep -E "build_id=$BID " | grep -E "renew rejected|lost ownership" | sed 's/^/   | worker: /' | head -2
 timeline_line "$R" "${BID%%:*}"
@@ -120,7 +120,7 @@ RETRIES=$($C logs --no-log-prefix shards 2>/dev/null | grep -c "scheduler call f
 SUCC=$($C logs --no-log-prefix shards 2>/dev/null | grep -c "succeeded after retries" || true)
 note "shard client: $RETRIES retried calls, $SUCC succeeded after retries, no shard failed"
 [ "$RETRIES" -gt 0 ] || fail "expected the shards to have retried at least one call during the restart"
-$C logs --no-log-prefix shards 2>/dev/null | grep -q "round failed" && fail "a round failed" || true
+[ "$($C logs --no-log-prefix shards 2>/dev/null | grep -c "round failed")" = 0 ] || fail "a round failed"
 NOT1=$(round_json "$R" | jget "sum(1 for b in d['builds'] if b['attempt']!=1)")
 [ "$NOT1" = 0 ] || fail "workers should be unaffected by a scheduler restart; $NOT1 builds not at attempt 1"
 note "all builds at attempt 1 (workers never noticed)"
@@ -137,6 +137,6 @@ check_round "$R"
 say "5. Stop the simulator cleanly (SIGTERM via docker stop)"
 $C stop shards >/dev/null 2>&1 || true
 { $C logs --no-log-prefix shards 2>/dev/null | grep -E "stopped by signal" | tail -1 | sed 's/^time=[^ ]* //' | sed 's/^/   | shards: /'; } || true
-$C logs --no-log-prefix shards 2>/dev/null | grep -q "stopped by signal" || fail "the simulator did not log that it was stopped by a signal"
+[ "$($C logs --no-log-prefix shards 2>/dev/null | grep -c "stopped by signal")" -gt 0 ] || fail "the simulator did not log that it was stopped by a signal"
 note "rounds run: $(latest_round 1)"
 reached_end=1

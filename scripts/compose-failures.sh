@@ -101,8 +101,8 @@ wait_state "0:$R" done 40 && note "done: $(build_row 0:$R)" || fail "build did n
 sleep 2
 note "the paused worker's log: its renew for attempt 1 is rejected when it wakes, it writes nothing more"
 { worker_logs "$VICTIM" | grep -E "attempt=1" | grep -E "claimed|renew rejected|lost ownership|cancell" | tail -4; } || true
-worker_logs "$VICTIM" | grep -q "lost ownership" || fail "paused worker did not log 'lost ownership'"
-if worker_logs "$VICTIM" | grep -E "build_id=0:$R " | grep -E "attempt=1" | grep -qE "completed"; then fail "paused worker completed with a stale attempt"; fi
+[ "$(worker_logs "$VICTIM" | grep -c "lost ownership")" -gt 0 ] || fail "paused worker did not log 'lost ownership'"
+if [ "$(worker_logs "$VICTIM" | grep -E "build_id=0:$R " | grep -E "attempt=1" | grep -cE "completed")" -gt 0 ]; then fail "paused worker completed with a stale attempt"; fi
 note "exactly one completion of this build across all workers (whichever claimed attempt 2; the woken worker may itself re-claim):"
 COMPLETIONS=$( { for w in $($C ps -aq worker); do worker_logs "$w" | grep -E "completed.*build_id=0:$R " || true; done; } )
 echo "$COMPLETIONS" | sed 's/^/   /'

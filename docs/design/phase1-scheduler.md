@@ -515,6 +515,23 @@ A fresh agent brought up its own stack with the simulator running continuous rou
 | The shard log showed `leased` then `leased` when a reap and re-claim fell between two reports; only the timeline's attempt column recorded the recovery. | The shard now logs and records an event on an attempt change (decision 62). |
 | Unstated: with a 5 s budget and 3.8 s builds the `docker stop` release path cannot run; the scheduler survives a Postgres restart (it does, via its connection pool); a shard need not observe `queued` during a sub-interval reap window. | Noted here. |
 
+### Step 7: batched reporting and 50 shards (done 2026-10-06)
+
+| Path | What |
+| --- | --- |
+| `scheduler/store` (`ReportBatch`), `scheduler/api` (`jobs` on the report) | Decision 63: the batch rides inside the report, one transaction, fill-in-only upserts. |
+| `shard/sim` | Records kept locally and sent once per poll interval; arrivals and the CPU start at round start, the build is submitted at the DDL offset and pre-DDL records are backfilled (decision 59); the CPU holds from DDL arrival to the placement reply (decision 64). |
+| `scripts/compose-round.sh`, `scripts/compose-failures-load.sh` | Run at `N_SHARDS=50 WORKERS=3`. |
+
+**50 shards, 3 workers, skewed preset, 10x (`test-logs/phase1/step7-compose-round-50.log`).** 29,934 shard-level queries from the generator. All 50 builds went to the GPU under policy v0 and finished at attempt 1. With 50 builds on 3 workers the GPU queue is finally visible: builds started as late as 3.3 s real (33 s modeled) after submit, and the round finished at 54.2 s modeled against 32.7 s at 6 shards, with a straggler lag of 1.6 s. Fan-out latency p50 2.0 s and p99 4.5 s modeled, against 0.4 s and 1.9 s at 6 shards: the queue wait shows up in the queries that need the index. The scheduler took one batched call per shard per half second, about 100 calls per second, each carrying tens of records, instead of the roughly 9,000 per-event calls per second the step 5 design would have needed.
+
+**The four failure tests at 50 shards and 3 workers, under load (`test-logs/phase1/step7-failures-load-50.log`).** Crash the largest build's leaseholder: attempt 2 completed once, every query finished, pool back to 3. Pause past the lease: attempt 2 once, the paused worker logged lost ownership for attempt 1. Scheduler restart: 31 shard calls retried and recovered, every build at attempt 1, the round completed. Duplicate submit: 200 `created:false`. Each round about 30,000 queries.
+
+**Phase 1 done-when, met:** a worker killed mid-build still results in that build finishing exactly once, at both 6 and 50 shards, and the other three failure tests pass at both sizes.
+
+A harness lesson from the 50-shard run, recorded in the study notes: `docker logs | grep -q` under `set -o pipefail` reports failure when the log is large, because `grep -q` exits at the first match and `docker logs` gets a broken pipe. Three checks had that shape; one would have failed falsely and two would have passed falsely.
+
+
 ## Open questions
 
 - **A failed GPU build and a waiting `needs_index` job.** `FinishCompleteRounds` treats `failed` as terminal, but the shard's job that needs the index can never start, so the round stays open forever. Resubmitting is a no-op by design. Candidates: the scheduler re-places a failed GPU build as local; or the shard marks dependent jobs skipped; or failed builds are retried once on the GPU. Decide in Phase 4, when the recall gate makes failure real. Raised by the cross-check.

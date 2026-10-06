@@ -8,7 +8,7 @@ Full roadmap, schema, policies and experiment plan: `docs/roadmap.md`. That is t
 
 ## Current phase
 
-**Phase 1: scheduler with fake jobs, Docker Compose, no Kubernetes.**
+**Phase 1 is done (2026-10-06). Next: Phase 2, Kubernetes on kind.** Phase 2 has not started; read its roadmap section and `docs/design/phase2-kubernetes.md` before beginning.
 Update this line when a phase is done. Don't start work that belongs to a later phase unless asked.
 
 ## Architecture

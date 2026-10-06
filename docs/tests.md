@@ -4,24 +4,6 @@ Every test in the repo, in plain words: the scenario it sets up and what it prov
 
 Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are numbered in `docs/design/phase1-scheduler.md`.
 
-## Contents
-
-Each step has its own tests first, then the independent cross-check's.
-
-- [Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`](#step-1-the-store-go-schedulerstore-log-step1-storelog)
-- [Step 2: scheduler API, policy, cost model (Go). Log: `step2-scheduler.log`](#step-2-scheduler-api-policy-cost-model-go-log-step2-schedulerlog)
-- [Steps 1 and 2, cross-check (Go, `scheduler/crosscheck`, non-worker tests). Log: `step2-crosscheck.log`](#steps-1-and-2-cross-check-go-schedulercrosscheck-non-worker-tests-log-step2-crosschecklog)
-- [Step 3: the Python worker (`worker/tests`). Log: `step3-worker.log`](#step-3-the-python-worker-workertests-log-step3-workerlog)
-- [Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`](#step-3-cross-check-of-the-worker-as-a-black-box-process-go-schedulercrosscheck-worker-tests-log-step3-crosscheck-workerlog)
-- [Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`](#step-4-compose-failure-tests-scriptscompose-failuressh-log-step4-compose-failureslog)
-- [Step 4, cross-check of the Compose stack (Go, `scheduler/crosscheck`, `Compose*` tests; need `KGPU_COMPOSE=1`). Log: `step4-crosscheck-compose.log`](#step-4-cross-check-of-the-compose-stack-go-schedulercrosscheck-compose-tests-need-kgpucompose1-log-step4-crosscheck-composelog)
-- [Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`](#step-5-shard-simulator-go-shardsim-log-step5-shardsimlog)
-- [Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`](#step-5-workload-generator-go-experimentsworkload-written-by-an-independent-agent-log-step5-workloadlog)
-- [Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`](#step-5-cross-check-of-the-shard-simulator-as-a-black-box-process-go-schedulercrosscheck-shardsim-tests-log-step5-crosscheck-shardsimlog)
-- [Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`](#step-6-shard-client-unit-tests-go-shardclient-log-step5-shardsimlog)
-- [Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`](#step-6-failure-tests-under-simulator-load-scriptscompose-failures-loadsh-log-step6-compose-failures-loadlog)
-- [Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`](#step-6-cross-check-under-load-go-schedulercrosscheck-load-tests-need-kgpucompose1-log-step6-crosscheck-loadlog)
-
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -227,3 +209,30 @@ Their own stack with the simulator running continuous rounds; after each injecte
 | LoadPostgresRestartMidRound | `docker compose restart postgres` mid-round under load. | The round completes correctly and neither worker restarts (decision 48 under real traffic). |
 | LoadDockerStopLeaseholderMidRound | `docker stop` the largest build's leaseholder with about 3.8 s left against a 5 s budget. | It logs `finishing current build before exit`, completes attempt 1, claims nothing more, deregisters at once, stays stopped (decisions 37, 49). |
 | LoadFinalReportShowsEmptyBacklog | Audit the settled `shard_status` of every round the run produced. | Every round's reports settle to an empty backlog; at stamp time a report can still lag by one interval (decision 62). |
+
+## Step 7: 50 shards and 3 workers (`scripts/compose-round.sh`, `scripts/compose-failures-load.sh`). Logs: `step7-compose-round-50.log`, `step7-failures-load-50.log`
+
+The same scripts as steps 5 and 6 with `N_SHARDS=50 WORKERS=3`.
+
+| Run | Scenario | Proves |
+| --- | --- | --- |
+| compose-round at 50 | One skewed round, 50 shards, 3 workers, 10x: about 30,000 queries. | All 50 builds done at attempt 1; every query recorded and finished; the round stamped; the GPU queue visible as late build starts and higher fan-out latency; one batched call per shard per poll interval carries it (decision 60). |
+| compose-failures-load at 50 | The four failure tests injected into live 50-shard rounds. | The same outcomes as at 6 shards: one completion per build at the recovered attempt, every query finished, shard retries across the scheduler restart, duplicate a no-op. The Phase 1 done-when condition at 50 shards. |
+
+## Contents
+
+Each step has its own tests first, then the independent cross-check's.
+
+- [Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`](#step-1-the-store-go-schedulerstore-log-step1-storelog)
+- [Step 2: scheduler API, policy, cost model (Go). Log: `step2-scheduler.log`](#step-2-scheduler-api-policy-cost-model-go-log-step2-schedulerlog)
+- [Steps 1 and 2, cross-check (Go, `scheduler/crosscheck`, non-worker tests). Log: `step2-crosscheck.log`](#steps-1-and-2-cross-check-go-schedulercrosscheck-non-worker-tests-log-step2-crosschecklog)
+- [Step 3: the Python worker (`worker/tests`). Log: `step3-worker.log`](#step-3-the-python-worker-workertests-log-step3-workerlog)
+- [Step 3, cross-check of the worker as a black-box process (Go, `scheduler/crosscheck`, `Worker*` tests). Log: `step3-crosscheck-worker.log`](#step-3-cross-check-of-the-worker-as-a-black-box-process-go-schedulercrosscheck-worker-tests-log-step3-crosscheck-workerlog)
+- [Step 4: Compose failure tests (`scripts/compose-failures.sh`). Log: `step4-compose-failures.log`](#step-4-compose-failure-tests-scriptscompose-failuressh-log-step4-compose-failureslog)
+- [Step 4, cross-check of the Compose stack (Go, `scheduler/crosscheck`, `Compose*` tests; need `KGPU_COMPOSE=1`). Log: `step4-crosscheck-compose.log`](#step-4-cross-check-of-the-compose-stack-go-schedulercrosscheck-compose-tests-need-kgpucompose1-log-step4-crosscheck-composelog)
+- [Step 5: shard simulator (Go, `shard/sim`). Log: `step5-shardsim.log`](#step-5-shard-simulator-go-shardsim-log-step5-shardsimlog)
+- [Step 5: workload generator (Go, `experiments/workload`, written by an independent agent). Log: `step5-workload.log`](#step-5-workload-generator-go-experimentsworkload-written-by-an-independent-agent-log-step5-workloadlog)
+- [Step 5, cross-check of the shard simulator as a black-box process (Go, `scheduler/crosscheck`, `Shardsim*` tests). Log: `step5-crosscheck-shardsim.log`](#step-5-cross-check-of-the-shard-simulator-as-a-black-box-process-go-schedulercrosscheck-shardsim-tests-log-step5-crosscheck-shardsimlog)
+- [Step 6: shard client unit tests (Go, `shard/client`). Log: `step5-shardsim.log`](#step-6-shard-client-unit-tests-go-shardclient-log-step5-shardsimlog)
+- [Step 6: failure tests under simulator load (`scripts/compose-failures-load.sh`). Log: `step6-compose-failures-load.log`](#step-6-failure-tests-under-simulator-load-scriptscompose-failures-loadsh-log-step6-compose-failures-loadlog)
+- [Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`](#step-6-cross-check-under-load-go-schedulercrosscheck-load-tests-need-kgpucompose1-log-step6-crosscheck-loadlog)
