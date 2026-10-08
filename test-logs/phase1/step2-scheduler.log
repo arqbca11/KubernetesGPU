@@ -1,203 +1,22 @@
 == Go tests against a throwaway Postgres
-date:      2026-10-05 23:22:58 PDT
-commit:    d1052fe (uncommitted changes)
+date:      2026-10-08 03:46:30 PDT
+commit:    8e8c42e (uncommitted changes)
 go:        go1.27.1
-postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-85067, port 25580)
-go:        go test -p 1 -count=1 -v ./scheduler/api/ ./scheduler/policy/ ./scheduler/costmodel/
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-30130, port 35423)
+go:        go test -p 1 -count=1 ./scheduler/api/
 python:    skipped
 
 Lines starting with 'store_test.go:N:' are the test narrating what it did.
 Lines tagged [db] are the build row as Postgres had it at that moment.
 
 == go test
-=== RUN   TestEndToEndRoundOverHTTP
-    api_test.go:95: --- a worker with 8 GiB registers by heartbeat (workers use SQL, not HTTP)
-    api_test.go:100: GET /workers
-              -> 200 {"pool":{"live_workers":1,"largest_mem_bytes":8589934592},"workers":[{"worker_id":"gpu-1","mem_bytes":8589934592,"last_seen":"2026-10-05T23:22:59.284112-07:00",...
-    api_test.go:105: --- shard simulator starts a round of 2 shards
-    api_test.go:107: POST /rounds {"scenario":"test","seed":42,"n_shards":2}
-              -> 201 {"round_id":1}
-    api_test.go:119: --- shard 1 submits a 100k x 128 build; it knows nothing about future queries
-    api_test.go:121: POST /builds {"round_id":1,"shard_id":1,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"1:1","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
-    api_test.go:125:     placed on gpu; estimates: cpu 20631 ms, gpu 4639 ms, mem 97 MiB
-    api_test.go:127: --- shard 1 resubmits the same build (retry after a timeout, say)
-    api_test.go:129: POST /builds {"round_id":1,"shard_id":1,"n_vectors":100000,"dim":128}
-              -> 200 {"build_id":"1:1","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":102400000,"created":false,"cpu_build_ms":20...
-    api_test.go:134: --- shard 2 submits a 20M x 128 build: 19 GiB modeled memory, more than any live worker
-    api_test.go:136: POST /builds {"round_id":1,"shard_id":2,"n_vectors":20000000,"dim":128}
-              -> 201 {"build_id":"2:1","placement":"local","priority":0,"reason":"needs 20480000000 bytes, largest live worker has 8589934592","mem_bytes":20480000000,"created":true...
-    api_test.go:140:     placed local: needs 20480000000 bytes, largest live worker has 8589934592
-    api_test.go:142: --- queries arrive at shard 1 while its build is queued on the gpu
-    api_test.go:143: POST /jobs/1/1 {"seq":0,"duration_ms":50,"needs_index":false}
-              -> 201 {"created":true,"round_id":1,"seq":0,"shard_id":1}
-    api_test.go:146: POST /jobs/1/1 {"seq":0,"duration_ms":50,"needs_index":false}
-              -> 200 {"created":false,"round_id":1,"seq":0,"shard_id":1}
-    api_test.go:149: POST /jobs/1/1 {"seq":1,"duration_ms":50,"needs_index":true}
-              -> 201 {"created":true,"round_id":1,"seq":1,"shard_id":1}
-    api_test.go:151: --- shard 1 reports: 2 waiting, 1 of them needs the index; the reply tells it the build is still queued
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":2,"waiting_needs_index":1,"oldest_wait_ms":120,"build_progress":0,"stream_done":false}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:157: --- shard 1's cpu is free, so query 0 (needs_index=false) runs now
-    api_test.go:158: POST /jobs/1/1/0/start
-              -> 200 {"event":"started","round_id":1,"seq":0,"shard_id":1}
-    api_test.go:161: POST /jobs/1/1/0/done
-              -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":1}
-    api_test.go:164: POST /jobs/1/1/0/done
-              -> 409 {"error":"job cannot be finished: started_at=2026-10-05 23:22:59.304666 -0700 PDT finished_at=2026-10-05 23:22:59.305379 -0700 PDT"}
-    api_test.go:168: --- the gpu worker claims and completes shard 1's build (SQL, as the Python worker will)
-    api_test.go:177: --- shard 1's next report learns the build is done; query 1 (needs_index) runs; stream exhausted
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":1,"waiting_needs_index":1,"oldest_wait_ms":300,"build_progress":0,"stream_done":false}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:182: POST /jobs/1/1/1/start
-              -> 200 {"event":"started","round_id":1,"seq":1,"shard_id":1}
-    api_test.go:183: POST /jobs/1/1/1/done
-              -> 200 {"event":"finished","round_id":1,"seq":1,"shard_id":1}
-    api_test.go:113: POST /shards/1/1/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"1:1","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:186: --- shard 2: one query arrives during its local build, then the build finishes, the query runs
-    api_test.go:187: POST /jobs/1/2 {"seq":0,"duration_ms":50,"needs_index":true}
-              -> 201 {"created":true,"round_id":1,"seq":0,"shard_id":2}
-    api_test.go:113: POST /shards/1/2/report {"queue_depth":1,"waiting_needs_index":1,"oldest_wait_ms":900,"build_progress":0.6,"stream_done":false}
-              -> 200 {"build":{"build_id":"2:1","placement":"local","state":"running","attempt":0}}
-    api_test.go:189: POST /builds/2:1/done
-              -> 200 {"build_id":"2:1","state":"done"}
-    api_test.go:192: POST /builds/2:1/done
-              -> 409 {"error":"build is local/done, not a running local build"}
-    api_test.go:195: POST /builds/1:1/done
-              -> 409 {"error":"build is gpu/done, not a running local build"}
-    api_test.go:198: POST /jobs/1/2/0/start
-              -> 200 {"event":"started","round_id":1,"seq":0,"shard_id":2}
-    api_test.go:199: POST /jobs/1/2/0/done
-              -> 200 {"event":"finished","round_id":1,"seq":0,"shard_id":2}
-    api_test.go:201: --- the round is still open: shard 2 has not said its stream is done
-    api_test.go:203: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T23:22:59.288793-07:00","finished_at":null},"builds":[{"build_id":"1:1",...
-    api_test.go:113: POST /shards/1/2/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"2:1","placement":"local","state":"done","attempt":0}}
-    api_test.go:209: --- the reaper tick (or a GET) stamps the round finished
-    api_test.go:211: GET /rounds/1
-              -> 200 {"round":{"round_id":1,"scenario":"test","seed":42,"n_shards":2,"started_at":"2026-10-05T23:22:59.288793-07:00","finished_at":"2026-10-05T23:22:59.316231-07:00"...
-    api_test.go:219:     build 1:1: gpu/done attempt 1
-    api_test.go:219:     build 2:1: local/done attempt 0
-    api_test.go:224:     round 1 finished; duration 27ms
---- PASS: TestEndToEndRoundOverHTTP (0.08s)
-=== RUN   TestReportReflectsPreemption
-    api_test.go:231: POST /rounds {"scenario":"test","seed":1,"n_shards":1}
-              -> 201 {"round_id":2}
-    api_test.go:235: POST /builds {"round_id":2,"shard_id":0,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"0:2","placement":"local","priority":0,"reason":"needs 102400000 bytes, largest live worker has 1","mem_bytes":102400000,"created":true,"cpu_build_m...
-    api_test.go:239: --- shard 0 builds locally and reports a growing queue
-    api_test.go:241: POST /shards/2/0/report {"queue_depth":5,"waiting_needs_index":1,"oldest_wait_ms":4000,"build_progress":0.2,"stream_done":false}
-              -> 200 {"build":{"build_id":"0:2","placement":"local","state":"running","attempt":0}}
-    api_test.go:245: --- (Phase 3 reconsider) preempts the build to the gpu queue
-    api_test.go:249: --- the shard's next report tells it: abort the local build
-    api_test.go:250: POST /shards/2/0/report {"queue_depth":6,"waiting_needs_index":1,"oldest_wait_ms":4500,"build_progress":0.3,"stream_done":false}
-              -> 200 {"build":{"build_id":"0:2","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:254: POST /builds/0:2/done
-              -> 409 {"error":"build is gpu/queued, not a running local build"}
-    api_test.go:257: --- a report for a shard with no build is 404; out-of-range fields are 400
-    api_test.go:258: POST /shards/2/7/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false}
-              -> 404 {"error":"this shard has no build in this round; submit first"}
-    api_test.go:261: POST /shards/2/0/report {"queue_depth":1,"waiting_needs_index":2,"oldest_wait_ms":0,"build_progress":0,"stream_done":false}
-              -> 400 {"error":"report fields out of range"}
---- PASS: TestReportReflectsPreemption (0.02s)
-=== RUN   TestValidationAndNotFound
-    api_test.go:290: POST /rounds {"scenario":"","seed":0,"n_shards":0}
-              -> 400 {"error":"n_shards must be positive"}
-    api_test.go:290: POST /rounds {"n_shards":1,"bogus":1}
-              -> 400 {"error":"bad json: json: unknown field \"bogus\""}
-    api_test.go:290: GET /rounds/999999
-              -> 404 {"error":"no such round"}
-    api_test.go:290: GET /rounds/abc
-              -> 400 {"error":"id must be an integer"}
-    api_test.go:290: POST /builds {"round_id":999999,"shard_id":1,"n_vectors":10,"dim":4}
-              -> 404 {"error":"no such round"}
-    api_test.go:290: POST /builds {"round_id":1,"shard_id":1,"n_vectors":0,"dim":4}
-              -> 400 {"error":"round_id, n_vectors and dim must be positive; shard_id non-negative"}
-    api_test.go:290: POST /builds/nope/done
-              -> 404 {"error":"no such build"}
-    api_test.go:290: POST /jobs/999999/1/0/start
-              -> 404 {"error":"no such job"}
-    api_test.go:290: GET /builds/nope
-              -> 404 {"error":"no such build"}
-    api_test.go:290: POST /jobs/999999/1 {"seq":-1,"duration_ms":0,"needs_index":false}
-              -> 400 {"error":"seq and duration_ms must be non-negative"}
-    api_test.go:290: GET /healthz
-              -> 200 {"status":"ok"}
---- PASS: TestValidationAndNotFound (0.01s)
-=== RUN   TestSubmitValidationAgainstRound
-    api_test.go:300: POST /rounds {"scenario":"test","seed":1,"n_shards":2}
-              -> 201 {"round_id":3}
-    api_test.go:303: --- shard ids are the shard's own numbering; 7 and 42 are fine in a 2-shard round
-    api_test.go:305: POST /builds {"round_id":3,"shard_id":7,"n_vectors":100000,"dim":128}
-              -> 201 {"build_id":"7:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":102400000,"created":true,"cpu_build_ms":20631,"gpu_total_ms":4639}
-    api_test.go:308: POST /builds {"round_id":3,"shard_id":42,"n_vectors":10,"dim":4}
-              -> 201 {"build_id":"42:3","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":320,"created":true,"cpu_build_ms":0,"gpu_total_ms":2000}
-    api_test.go:312: --- a third distinct shard would let the round finish early: refused
-    api_test.go:313: POST /builds {"round_id":3,"shard_id":99,"n_vectors":10,"dim":4}
-              -> 409 {"error":"round already has n_shards builds"}
-    api_test.go:317: --- a duplicate with a different body returns estimates for the STORED row, and is fine in a full round
-    api_test.go:318: POST /builds {"round_id":3,"shard_id":7,"n_vectors":5,"dim":128}
-              -> 200 {"build_id":"7:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":102400000,"created":false,"cpu_build_ms":20...
-    api_test.go:323: --- finish the round; a duplicate is still 200, a new build would be 409
-    api_test.go:332: POST /shards/3/7/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"7:3","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:332: POST /shards/3/42/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true}
-              -> 200 {"build":{"build_id":"42:3","placement":"gpu","state":"done","attempt":1}}
-    api_test.go:335: GET /rounds/3
-              -> 200 {"round":{"round_id":3,"scenario":"test","seed":1,"n_shards":2,"started_at":"2026-10-05T23:22:59.357386-07:00","finished_at":"2026-10-05T23:22:59.367447-07:00"}...
-    api_test.go:339: POST /builds {"round_id":3,"shard_id":42,"n_vectors":10,"dim":4}
-              -> 200 {"build_id":"42:3","placement":"gpu","priority":0,"reason":"duplicate submit; existing decision returned","mem_bytes":320,"created":false,"cpu_build_ms":0,"gpu_...
---- PASS: TestSubmitValidationAgainstRound (0.02s)
-=== RUN   TestReportWithJobBatch
-    api_test.go:349: POST /rounds {"scenario":"test","seed":1,"n_shards":1}
-              -> 201 {"round_id":4}
-    api_test.go:351: POST /builds {"round_id":4,"shard_id":0,"n_vectors":1000,"dim":4}
-              -> 201 {"build_id":"0:4","placement":"gpu","priority":0,"reason":"always_gpu","mem_bytes":32000,"created":true,"cpu_build_ms":3,"gpu_total_ms":2001}
-    api_test.go:356: --- a report with two records, one finished
-    api_test.go:358: POST /shards/4/0/report {"queue_depth":1,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":0,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.385358-07:00","started_at":"2026-10-05T23:22:54.386358-07:00","finished_at":"2026-10-05T23:22:54.396358-07:00"},{"seq":1,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.387358-07:00","started_at":null,"finished_at":null}]}
-              -> 200 {"build":{"build_id":"0:4","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:366: GET /rounds/4
-              -> 200 {"round":{"round_id":4,"scenario":"test","seed":1,"n_shards":1,"started_at":"2026-10-05T23:22:59.380403-07:00","finished_at":null},"builds":[{"build_id":"0:4","...
-    api_test.go:370:     both recorded with the shard's timestamps; the reply still carries the build
-    api_test.go:372: --- bad batches are 400
-    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"0001-01-01T00:00:00Z","started_at":null,"finished_at":null}]}
-              -> 400 {"error":"jobs[0]: seq and duration_ms must be non-negative and arrived_at set"}
-    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.395358-07:00","started_at":"2026-10-05T23:22:54.390358-07:00","finished_at":null}]}
-              -> 400 {"error":"jobs[0]: started_at before arrived_at"}
-    api_test.go:378: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":false,"jobs":[{"seq":5,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.395358-07:00","started_at":null,"finished_at":"2026-10-05T23:22:54.405358-07:00"}]}
-              -> 400 {"error":"jobs[0]: finished_at without started_at or before it"}
-    api_test.go:382: --- stream_done with the last record; then a new arrival is 409
-    api_test.go:383: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true,"jobs":[{"seq":1,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.387358-07:00","started_at":"2026-10-05T23:22:54.397358-07:00","finished_at":"2026-10-05T23:22:54.407358-07:00"}]}
-              -> 200 {"build":{"build_id":"0:4","placement":"gpu","state":"queued","attempt":0}}
-    api_test.go:386: POST /shards/4/0/report {"queue_depth":0,"waiting_needs_index":0,"oldest_wait_ms":0,"build_progress":0,"stream_done":true,"jobs":[{"seq":2,"duration_ms":10,"needs_index":false,"arrived_at":"2026-10-05T23:22:54.415358-07:00","started_at":null,"finished_at":null}]}
-              -> 409 {"error":"batch brings new arrivals after stream_done"}
---- PASS: TestReportWithJobBatch (0.02s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.452s
-=== RUN   TestAlwaysGPU
-    policy_test.go:19: fits                                          -> gpu   (always_gpu)
-    policy_test.go:19: exactly fits                                  -> gpu   (always_gpu)
-    policy_test.go:19: too big for every live worker                 -> local (needs 17179869184 bytes, largest live worker has 8589934592)
-    policy_test.go:19: no live workers: still queue (pool may be cold) -> gpu   (always_gpu)
---- PASS: TestAlwaysGPU (0.00s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/policy	0.268s
-=== RUN   TestDefaultsAreInTheIntendedRange
-    costmodel_test.go:12: 100k x 128: cpu=20.631162433s gpu(total incl. transfer)=4.639116243s mem=97 MiB
-    costmodel_test.go:21: 1k x 128: cpu=123.786974ms gpu=2.018138697s
---- PASS: TestDefaultsAreInTheIntendedRange (0.00s)
-=== RUN   TestMonotonicInSize
---- PASS: TestMonotonicInSize (0.00s)
-PASS
-ok  	github.com/arqbca11/KubernetesGPU/scheduler/costmodel	0.327s
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/api	0.644s
 
-== Docker events for container kgpu-test-pg-85067
-  23:22:57  create
-  23:22:57  start
-  23:23:00  kill
-  23:23:00  die
-  23:23:00  destroy
+== Docker events for container kgpu-test-pg-30130
+  03:46:28  create
+  03:46:29  start
+  03:46:31  kill
+  03:46:31  die
+  03:46:31  destroy
 
 == Result: PASS

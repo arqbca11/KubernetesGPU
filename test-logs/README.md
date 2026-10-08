@@ -25,6 +25,7 @@ Narrated test output, kept so what was checked and what happened can be read wit
 | `phase2/step2-postgres-scheduler.log` | Phase 2 step 2: Postgres and the scheduler on kind; pod deletions survived. |
 | `phase2/step12-crosscheck-kind.log` | The cross-check agent's nine tests of steps 1 and 2 on kind, in its own namespace. |
 | `phase2/step3-workers.log` | Phase 2 step 3: the workers on the GPU node; graceful deletion, in-container crash, forced deletion. |
+| `phase2/step3-crosscheck-kind-workers.log` | The cross-check agent's nine worker scenarios on kind: two reapers, Postgres outage, liveness freeze, SIGTERM both branches, node drain. |
 
 Per-step logs are the state of the tests at the end of that step, including any fixes from the step's cross-check round, regenerated whenever the step's code changes. `history/` (local only, not committed) keeps every timestamped run.
 

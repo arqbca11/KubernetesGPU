@@ -75,6 +75,9 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+            # A hung process cannot act on SIGTERM, so a liveness restart must not
+            # wait out the pod's 30 s grace period (observed: 52 s to restart).
+            terminationGracePeriodSeconds: 5
           resources:
             requests: {cpu: "100m", memory: "128Mi"}
             limits: {memory: "512Mi"}

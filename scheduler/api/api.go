@@ -504,9 +504,17 @@ func (s *Server) jobEvent(w http.ResponseWriter, r *http.Request,
 
 // ---- workers, health ------------------------------------------------------
 
+// WorkerView is a registered worker plus whether the pool currently counts
+// it: live means seen within WorkerStaleAfter. The list keeps stale workers
+// so an operator can see who has gone quiet.
+type WorkerView struct {
+	store.Worker
+	Live bool `json:"live"`
+}
+
 type WorkersResponse struct {
 	Pool    store.PoolState `json:"pool"`
-	Workers []store.Worker  `json:"workers"`
+	Workers []WorkerView    `json:"workers"`
 }
 
 func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
@@ -521,10 +529,11 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, "list workers", err)
 		return
 	}
-	if ws == nil {
-		ws = []store.Worker{}
+	views := make([]WorkerView, 0, len(ws))
+	for _, x := range ws {
+		views = append(views, WorkerView{Worker: x, Live: time.Since(x.LastSeen) <= s.cfg.WorkerStaleAfter})
 	}
-	writeJSON(w, http.StatusOK, WorkersResponse{Pool: pool, Workers: ws})
+	writeJSON(w, http.StatusOK, WorkersResponse{Pool: pool, Workers: views})
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {

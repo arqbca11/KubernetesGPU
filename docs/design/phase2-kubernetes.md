@@ -103,6 +103,8 @@ sequenceDiagram
 | 17 | **`WORKER_ID` is the pod name, from the downward API** | The hostname (what Compose used) | On Kubernetes the hostname is the pod name anyway, but saying so explicitly gives a readable, unique id per replica, and a replaced pod gets a new one. |
 | 18 | **The worker image carries its own init (tini at PID 1)** | Rely on the platform's init flag | Compose had `init: true`; Kubernetes has no such flag. Without an init, python is PID 1 and an in-container SIGKILL is dropped by the kernel: the first version of the step 3 crash test killed nothing. tini also forwards SIGTERM and reaps zombies. |
 | 19 | **The crash test on Kubernetes is an in-container kill of the worker process, not a forced pod deletion.** `kubectl delete pod --grace-period=0 --force` still delivers SIGTERM before the kill, so the worker's release path runs and no lease expires; it is a graceful stop in disguise. The in-container kill exits the container with 137, the lease expires, the reaper requeues, and the kubelet restarts the container in place | Treat forced deletion as the crash | Measured: forced deletion gave attempt 2 in 8 s with zero lease expiries; the in-container kill gave attempt 2 in 17 s (10 s lease plus the 6.5 s build) with one expiry and restart count 1. The script keeps the forced deletion as a documented observation. |
+| 20 | **The worker's liveness probe carries its own `terminationGracePeriodSeconds: 5`** | Inherit the pod's 30 s | A process the liveness probe has declared hung cannot act on SIGTERM; waiting the pod's full grace period before SIGKILL meant a frozen worker took 52 s to restart (cross-check). The lease path was unaffected (reaped at 10 s); this only shortens how long a dead container occupies the slot. |
+| 21 | **`GET /workers` lists every registered worker with a `live` flag; `pool` counts only the live ones** | List only live workers | An operator wants to see who went quiet; the policy wants the live count. Both from one call. (Cross-check gap.) |
 
 ## Implementation notes
 
@@ -161,6 +163,21 @@ Real builds are minutes on a GPU and hours on a CPU (see the Phase 1 doc, "Cost 
 | `scripts/k8s-check-step3.sh` | The step's check; saves `test-logs/phase2/step3-workers.log`. |
 
 Observed: both workers on `kgpu-worker3`, registered under their pod names; a 2M-vector build done at attempt 1 with both probes answering 200 mid-build; a graceful deletion mid-build released the build within a second and the replacement landed on the GPU node, the build finishing at attempt 2 once; an in-container kill expired the lease and the build finished at attempt 2 once, 17 s later, with the container restarted in place; a forced deletion ran the release path (decision 19).
+
+### Cross-check of step 3, the workers (2026-10-08)
+
+A fresh agent deployed its own stack into `kgpu-xcheck` and ran 9 subtests, all passed, saved as `test-logs/phase2/step3-crosscheck-kind-workers.log`. Beyond the implementer's check: three replicas leased three builds at once and a scale-down released the long one and deregistered within a second; with two scheduler replicas, two leaseholders SIGKILLed at the same moment produced exactly one reap line per build across both schedulers and one completion each; a 40 s Postgres outage mid-build gave readiness 503 from about 8 s with liveness 200 on 38 of 38 samples, no restarts, the attempt lost to the lease deadline and recovered once Postgres returned (Phase 1 decision 48 on Kubernetes); a SIGSTOP'd worker was caught by liveness while the reaper recovered its lease at 10 s; SIGTERM with 3 s left finished the build and with 7 s left released it; draining the GPU node evicted both workers through the release path, left five builds queued with replacements Pending on the taint, and uncordoning drained the queue with every build completed once.
+
+The agent disclosed that one exploratory `kubectl apply` landed on the `kgpu` namespace with an unmodified render because macOS `sed` silently ignored a `\s` pattern; the objects were unchanged except an annotation, no pod restarted, and the rewrite was redone with perl and verified.
+
+| Finding | Resolution |
+| --- | --- |
+| A hung worker took 52 s to restart: liveness fired at 30 s, then SIGTERM to a stopped process waited the pod's 30 s grace. | Decision 20: a 5 s grace on the liveness probe. |
+| `/workers` listed a frozen worker while the pool counted one. | Decision 21: a `live` flag per worker. |
+| Two reapers were never seen contending: the same replica logged every reap and an idle tick logs nothing. | Per-replica `lease_expirations_total` in step 5 makes it visible. |
+| The readiness threshold is "within three heartbeat intervals" measured from the last *successful* heartbeat; the probe period adds up to one interval, so the first 503 lands 2 to 3 intervals after the last success. | Stated here. |
+| A Postgres outage longer than the lease always costs the in-flight attempt (decision 48 working as designed). | Noted beside the roadmap's "Restart Postgres" item. |
+| The drain checklist item is answered for workers; the dashboard view is pending. | Roadmap ticked with the note. |
 
 ## Open questions
 

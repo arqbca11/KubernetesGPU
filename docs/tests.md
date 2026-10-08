@@ -27,6 +27,7 @@ Each step has its own tests first, then any scripts, then the independent cross-
 - [Phase 2, step 2: Postgres and the scheduler on kind (`scripts/k8s-check-step2.sh`). Log: `phase2/step2-postgres-scheduler.log`](#phase-2-step-2-postgres-and-the-scheduler-on-kind-scriptsk8s-check-step2sh-log-phase2step2-postgres-schedulerlog)
 - [Phase 2, steps 1 and 2, cross-check on kind (Go, `scheduler/crosscheck`, `TestKind` subtests; need `KGPU_KIND=1`). Log: `phase2/step12-crosscheck-kind.log`](#phase-2-steps-1-and-2-cross-check-on-kind-go-schedulercrosscheck-testkind-subtests-need-kgpukind1-log-phase2step12-crosscheck-kindlog)
 - [Phase 2, step 3: the workers on kind (`scripts/k8s-check-step3.sh`). Log: `phase2/step3-workers.log`](#phase-2-step-3-the-workers-on-kind-scriptsk8s-check-step3sh-log-phase2step3-workerslog)
+- [Phase 2, step 3, cross-check on kind (Go, `scheduler/crosscheck`, `TestKindWorkers` subtests; need `KGPU_KIND=1`). Log: `phase2/step3-crosscheck-kind-workers.log`](#phase-2-step-3-cross-check-on-kind-go-schedulercrosscheck-testkindworkers-subtests-need-kgpukind1-log-phase2step3-crosscheck-kind-workerslog)
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -296,3 +297,17 @@ The agent deploys its own copy of the stack into a `kgpu-xcheck` namespace with 
 | 3 | `kubectl delete pod` the leaseholder mid-build. | SIGTERM: the build is released within a second, the Deployment's replacement lands on the GPU node, and the build finishes at attempt 2 exactly once (decision 37 of Phase 1). |
 | 4 | SIGKILL the worker's python process inside its container (tini is PID 1). | The lease expires, the reaper requeues, attempt 2 completes once, the container is restarted in place with restart count 1 (decisions 18, 19). |
 | 5 | `kubectl delete pod --grace-period=0 --force` the leaseholder (observation). | The release path still runs and no lease expires: a forced deletion is a graceful stop in disguise, not a crash (decision 19). |
+
+## Phase 2, step 3, cross-check on kind (Go, `scheduler/crosscheck`, `TestKindWorkers` subtests; need `KGPU_KIND=1`). Log: `phase2/step3-crosscheck-kind-workers.log`
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| KindWorkers/WorkersPinnedNamedAndTini | Inspect the worker pods, their env, their process tree and their probes. | Both on the GPU node; `WORKER_ID` equals the pod name in env and pool; PID 1 is tini with one python child; grace 30 s; both probes 200 (decisions 5, 16 to 18). |
+| KindWorkers/ScaleToThreeThenBackToTwo | Scale to 3, submit three builds, scale back to 2. | All three on the GPU node, pool 3, three simultaneous leases; scale-down releases the long build at once and deregisters within a second; each build completed once (Phase 1 decisions 37, 49). |
+| KindWorkers/TwoSchedulersReapOnceCompleteOnce | Two scheduler replicas; SIGKILL both leaseholders at the same moment. | One reap line per build across both schedulers, each done at attempt 2 once, containers exit 137 and restart in place (Phase 2 decision 2). |
+| KindWorkers/PostgresOutageMidBuild | Postgres scaled to zero for 40 s during a build. | `/healthz` 503 from about 8 s, `/livez` 200 throughout, Ready flips, 0 restarts, the lease is lost at the deadline and the build completes once at attempt 2 after recovery (Phase 1 decision 48). |
+| KindWorkers/LivenessFreezeRestartsContainer | SIGSTOP the worker's python. | `/livez` times out; the lease is reaped at about 10 s and the other worker finishes attempt 2; the kubelet restarts the container (decision 20 now shortens the wait). |
+| KindWorkers/SIGTERMFinishInsideBudgetReleaseOutside | Delete the leaseholder with about 3 s left, then another with about 7 s left. | Finish path: completed at attempt 1 by the terminating pod; release path: off the pod in 0.2 s, done at attempt 2 elsewhere; no reaps (Phase 1 decision 37). |
+| KindWorkers/DrainGPUNode | `kubectl drain` the GPU node mid-build, submit more, uncordon. | Both builds released, pool 0, replacements Pending on the taint, five builds queued; after uncordon all done once (released at attempt 2, new at attempt 1). |
+| KindWorkers/BuildLogLinesCarryIDs | Collect every worker and scheduler log line naming a build. | Each carries `attempt` and `round_id` (CLAUDE.md convention). |
+| KindWorkers/ImplementerWorkersBack | Snapshot the `kgpu` workers around the drain. | They return to 2 Running and Ready on the GPU node; the node is schedulable. |

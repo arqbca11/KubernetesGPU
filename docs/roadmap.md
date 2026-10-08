@@ -237,8 +237,8 @@ Install Prometheus and Grafana with the `kube-prometheus-stack` Helm chart and s
 
 - [ ] Delete a worker pod mid-build
 - [ ] Delete the scheduler pod mid-round
-- [ ] Drain the stand-in GPU node: every worker is evicted and the queue grows. This is the case the CPU-fallback policies in Phase 3 should handle.
-- [ ] Restart Postgres: services retry, and nothing completes twice
+- [x] Drain the stand-in GPU node: every worker is evicted and the queue grows. This is the case the CPU-fallback policies in Phase 3 should handle. *(Step 3 cross-check: both workers released their builds, five builds queued, replacements Pending on the taint, all completed once after uncordon. The dashboard view comes with step 5.)*
+- [x] Restart Postgres: services retry, and nothing completes twice *(step 2 check and step 3 cross-check; note that an outage longer than the lease costs the in-flight attempt, by design, Phase 1 decision 48)*
 
 ## Phase 3: Placement policies and experiments
 
