@@ -11,7 +11,8 @@
 //	POST /jobs/{round}/{shard}/{seq}/done        the query finished
 //	POST /shards/{round}/{shard}/report          the shard's load report; reply carries the build's placement
 //	GET  /workers                                registered workers and the live pool state
-//	GET  /healthz                                200 when Postgres answers
+//	GET  /healthz                                200 when Postgres answers (readiness)
+//	GET  /livez                                  200 when the process answers at all (liveness)
 package api
 
 import (
@@ -55,6 +56,9 @@ func New(st *store.Store, pol policy.Policy, cm costmodel.Model, cfg Config, log
 	s.mux.HandleFunc("POST /jobs/{round}/{shard}/{seq}/done", s.jobDone)
 	s.mux.HandleFunc("GET /workers", s.workers)
 	s.mux.HandleFunc("GET /healthz", s.healthz)
+	s.mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+	})
 	return s
 }
 

@@ -1,0 +1,85 @@
+# Postgres: one pod with its own persistent disk. A StatefulSet gives the pod a
+# stable name (postgres-0) and a PersistentVolumeClaim that outlives the pod,
+# so deleting or rescheduling the pod keeps the data (design decision 3).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  namespace: kgpu
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: kgpu
+  DATABASE_URL: postgres://postgres:kgpu@postgres:5432/kgpu?sslmode=disable
+---
+# A headless Service: DNS name "postgres" resolves to the pod itself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kgpu
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: pg
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: kgpu
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:17
+          env:
+            - name: POSTGRES_DB
+              value: kgpu
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: pg
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "kgpu"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "kgpu"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {memory: "1Gi"}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

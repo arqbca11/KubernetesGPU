@@ -1,0 +1,43 @@
+
+== Phase 2 step 2: Postgres StatefulSet and scheduler Deployment on kind  (2026-10-08 02:59:03 PDT, commit 3d9b359)
+
+== 1. Pods, and the scheduler's startup log (connect, migrate, listen)
+   postgres-0 Running restarts=0 node=kgpu-worker2
+   scheduler-dbc976bcf-7fxxj Running restarts=0 node=kgpu-worker
+   | connected to postgres {}
+   | scheduler listening {'addr': ':8080', 'policy': 'always_gpu', 'reap_interval': 2000000000, 'max_attempts': 5, 'worker_stale_after': 15000000000}
+   migrations in Postgres:
+   | 0001_init.sql
+   | 0002_rounds_n_shards.sql
+   | 0003_query_stream.sql
+   | 0004_shard_fks.sql
+   PVC:
+   | data-postgres-0 Bound 2Gi
+
+== 2. The API through the Service (port-forward): a round and a build
+   healthz: {"status":"ok"}  livez: {"status":"alive"}
+   round 4 created; build: 0:4 gpu created=True
+
+== 3. Delete the scheduler pod mid-flight: the Deployment replaces it; the data was never in it
+   deleted scheduler-dbc976bcf-7fxxj
+   replacement pod: scheduler-dbc976bcf-7jzx9
+   postgres-0 Running restarts=0 node=kgpu-worker2
+   scheduler-dbc976bcf-7jzx9 Running restarts=0 node=kgpu-worker
+   GET /rounds/1 from the new pod: 1 builds=1
+
+== 4. Delete the Postgres pod: the StatefulSet recreates postgres-0 on its PVC; the scheduler recovers without a restart
+   deleted postgres-0 (restart count of scheduler before: 0)
+   scheduler readiness while Postgres is down: ready=true
+   postgres-0 is back
+   scheduler ready again
+   postgres-0 Running restarts=0 node=kgpu-worker2
+   scheduler-dbc976bcf-7jzx9 Running restarts=0 node=kgpu-worker
+   scheduler restart count unchanged: 0
+   GET /rounds/1 after the Postgres restart: 1 builds=1
+   a new round after recovery: round 5
+   scheduler log around the outage:
+   | ERROR reap failed {'err': 'FATAL: terminating connection due to administrator command (SQLSTATE 57P01)'}
+   | ERROR finish rounds failed {'err': 'failed to connect to `user=postgres database=kgpu`: hostname resolving error: lookup postgres on 10.96.0.10:53:
+
+== Result: PASS
+log: test-logs/phase2/step2-postgres-scheduler.log

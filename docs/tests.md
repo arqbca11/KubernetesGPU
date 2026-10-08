@@ -24,6 +24,7 @@ Each step has its own tests first, then any scripts, then the independent cross-
 - [Step 7: 50 shards and 3 workers (`scripts/compose-round.sh`, `scripts/compose-failures-load.sh`). Logs: `step7-compose-round-50.log`, `step7-failures-load-50.log`](#step-7-50-shards-and-3-workers-scriptscompose-roundsh-scriptscompose-failures-loadsh-logs-step7-compose-round-50log-step7-failures-load-50log)
 - [Step 7, cross-check at 50 shards (Go, `scheduler/crosscheck`, `Load*` tests with `KGPU_XCHECK_SHARDS=50 KGPU_XCHECK_WORKERS=3`; need `KGPU_COMPOSE=1`). Log: `step7-crosscheck-load-50.log`](#step-7-cross-check-at-50-shards-go-schedulercrosscheck-load-tests-with-kgpuxcheckshards50-kgpuxcheckworkers3-need-kgpucompose1-log-step7-crosscheck-load-50log)
 - [Phase 2, step 1: the kind cluster (`scripts/kind-check-gpu-node.sh`). Log: `phase2/step1-kind-cluster.log`](#phase-2-step-1-the-kind-cluster-scriptskind-check-gpu-nodesh-log-phase2step1-kind-clusterlog)
+- [Phase 2, step 2: Postgres and the scheduler on kind (`scripts/k8s-check-step2.sh`). Log: `phase2/step2-postgres-scheduler.log`](#phase-2-step-2-postgres-and-the-scheduler-on-kind-scriptsk8s-check-step2sh-log-phase2step2-postgres-schedulerlog)
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -258,3 +259,12 @@ The step 6 suite parametrised by shard and worker count, plus three scale tests 
 | 2 | Six plain pause pods with no toleration. | None lands on the GPU node: the taint repels everything that does not tolerate it. |
 | 3 | A worker-shaped pod with the toleration and the node selector. | It lands on the GPU node and nowhere else. |
 | 4 | A pod with the selector but no toleration. | It stays Pending with no node; the scheduler's event cites the untolerated taint. |
+
+## Phase 2, step 2: Postgres and the scheduler on kind (`scripts/k8s-check-step2.sh`). Log: `phase2/step2-postgres-scheduler.log`
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 1 | Read the scheduler pod's startup log and query `schema_migrations` inside `postgres-0`. | The scheduler connected, applied all four migrations and listened; the claim is bound. |
+| 2 | A round and a build through the Service, via port-forward. | The API works inside the cluster; readiness and liveness answer. |
+| 3 | Delete the scheduler pod. | The Deployment replaces it under a new name; the round is still there (state lives in Postgres, decision 3). |
+| 4 | Delete `postgres-0`. | The StatefulSet recreates it on the same claim with the data intact; the scheduler logs errors during the outage, keeps restart count 0, becomes ready again and serves a new round (decisions 11, 13, 14). |
