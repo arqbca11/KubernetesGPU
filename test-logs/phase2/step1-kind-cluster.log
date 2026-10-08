@@ -1,0 +1,32 @@
+
+== Phase 2 step 1: kind cluster with a stand-in GPU node  (2026-10-08 02:45:35 PDT, commit b10406a)
+   kind v0.33.0, kubectl v1.37.1
+
+== 1. Nodes, labels and taints
+   kgpu-control-plane Ready role=containerd://2.3.4
+   kgpu-worker Ready role=general
+   kgpu-worker2 Ready role=general
+   kgpu-worker3 Ready role=true
+   taints: kgpu-control-plane   node-role.kubernetes.io/control-plane
+   taints: kgpu-worker          <none>
+   taints: kgpu-worker2         <none>
+   taints: kgpu-worker3         kgpu.io/gpu
+   GPU node: kgpu-worker3
+
+== 2. Six plain pods (no toleration): none may land on the GPU node
+   plain-1 -> kgpu-worker
+   plain-2 -> kgpu-worker2
+   plain-3 -> kgpu-worker
+   plain-4 -> kgpu-worker2
+   plain-5 -> kgpu-worker2
+   plain-6 -> kgpu-worker
+
+== 3. A worker-shaped pod (toleration + nodeSelector): must land on the GPU node
+   gpu-shaped -> kgpu-worker3
+
+== 4. A pod with the selector but no toleration: must stay Pending (the taint repels it)
+   selector-only: phase=Pending node=<none>
+   scheduler says: 0/4 nodes are available: 2 node(s) didn't match Pod's node affinity/selector, 2 node(s) had untolerated taint(s). preemption: 0/4 nodes are available: 4 Preempt
+
+== Result: PASS
+log: test-logs/phase2/step1-kind-cluster.log

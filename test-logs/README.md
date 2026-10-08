@@ -21,6 +21,7 @@ Narrated test output, kept so what was checked and what happened can be read wit
 | `phase1/step7-compose-round-50.log` | Step 7: one 50-shard, 3-worker round with the timeline. |
 | `phase1/step7-failures-load-50.log` | Step 7: the four failure tests injected into live 50-shard rounds. |
 | `phase1/step7-crosscheck-load-50.log` | The cross-check agent's suite at 50 shards and 3 workers, with the batching, fidelity and GPU-queue scale tests. |
+| `phase2/step1-kind-cluster.log` | Phase 2 step 1: the kind cluster's GPU node admits only worker-shaped pods. |
 
 Per-step logs are the state of the tests at the end of that step, including any fixes from the step's cross-check round, regenerated whenever the step's code changes. `history/` (local only, not committed) keeps every timestamped run.
 

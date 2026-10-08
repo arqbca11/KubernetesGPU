@@ -6,7 +6,7 @@ Legend for "proves": the invariants are numbered in `CLAUDE.md`; decisions are n
 
 ## Contents
 
-Each step has its own tests first, then any scripts, then the independent cross-check's.
+Each step has its own tests first, then any scripts, then the independent cross-check's. Phase 1 sections come before Phase 2.
 
 - [Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`](#step-1-the-store-go-schedulerstore-log-step1-storelog)
 - [Step 2: scheduler API, policy, cost model (Go). Log: `step2-scheduler.log`](#step-2-scheduler-api-policy-cost-model-go-log-step2-schedulerlog)
@@ -23,6 +23,7 @@ Each step has its own tests first, then any scripts, then the independent cross-
 - [Step 6, cross-check under load (Go, `scheduler/crosscheck`, `Load*` tests; need `KGPU_COMPOSE=1`). Log: `step6-crosscheck-load.log`](#step-6-cross-check-under-load-go-schedulercrosscheck-load-tests-need-kgpucompose1-log-step6-crosscheck-loadlog)
 - [Step 7: 50 shards and 3 workers (`scripts/compose-round.sh`, `scripts/compose-failures-load.sh`). Logs: `step7-compose-round-50.log`, `step7-failures-load-50.log`](#step-7-50-shards-and-3-workers-scriptscompose-roundsh-scriptscompose-failures-loadsh-logs-step7-compose-round-50log-step7-failures-load-50log)
 - [Step 7, cross-check at 50 shards (Go, `scheduler/crosscheck`, `Load*` tests with `KGPU_XCHECK_SHARDS=50 KGPU_XCHECK_WORKERS=3`; need `KGPU_COMPOSE=1`). Log: `step7-crosscheck-load-50.log`](#step-7-cross-check-at-50-shards-go-schedulercrosscheck-load-tests-with-kgpuxcheckshards50-kgpuxcheckworkers3-need-kgpucompose1-log-step7-crosscheck-load-50log)
+- [Phase 2, step 1: the kind cluster (`scripts/kind-check-gpu-node.sh`). Log: `phase2/step1-kind-cluster.log`](#phase-2-step-1-the-kind-cluster-scriptskind-check-gpu-nodesh-log-phase2step1-kind-clusterlog)
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -248,3 +249,12 @@ The step 6 suite parametrised by shard and worker count, plus three scale tests 
 | LoadScaleReportsAreBatched | `shard_jobs` sampled per shard every 50 ms through a whole live round. | Each shard's records change at most once per report interval, about 35 records per change; the scheduler logs nothing per query (decisions 60, 63). |
 | LoadScaleQueryRunTimeFidelity | Every query's recorded run time compared with its exact scaled duration, across a whole round. | Aggregate within 3 percent, each within the larger of 5 percent and 1 ms, none short (decision 65). Caught bug log 8. |
 | LoadScaleRoundSetByGPUQueue | A 50-shard round's build start and finish times against total GPU work. | Builds wait seconds in the queue; the last build finishes within 15 percent of total GPU work divided by workers; shard finish order follows service order; the straggler is among the last three served (decision 67). |
+
+## Phase 2, step 1: the kind cluster (`scripts/kind-check-gpu-node.sh`). Log: `phase2/step1-kind-cluster.log`
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 1 | List nodes, labels and taints after `kind-up`. | One node carries `kgpu.io/gpu=true` and the `NoSchedule` taint; the rest carry neither. |
+| 2 | Six plain pause pods with no toleration. | None lands on the GPU node: the taint repels everything that does not tolerate it. |
+| 3 | A worker-shaped pod with the toleration and the node selector. | It lands on the GPU node and nowhere else. |
+| 4 | A pod with the selector but no toleration. | It stays Pending with no node; the scheduler's event cites the untolerated taint. |

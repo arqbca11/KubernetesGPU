@@ -1,0 +1,32 @@
+# Phase 2 cluster: one control-plane node and three worker nodes, all Docker
+# containers on the laptop. Node "gpu-1" is the stand-in GPU pool: it carries
+# the label kgpu.io/gpu=true and the taint kgpu.io/gpu=true:NoSchedule, so
+# only pods that tolerate the taint and select the label (the GPU workers)
+# can land there, and nothing else can. Phase 5 adds a real GPU to the same
+# selector and toleration.
+#
+#   scripts/kind-up.sh      create the cluster and taint the GPU node
+#   scripts/kind-down.sh    delete it
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kgpu
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      kgpu.io/role: general
+  - role: worker
+    labels:
+      kgpu.io/role: general
+  - role: worker
+    labels:
+      kgpu.io/role: gpu
+      kgpu.io/gpu: "true"
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: kgpu.io/gpu
+              value: "true"
+              effect: NoSchedule

@@ -204,8 +204,8 @@ Run the same system on a local kind cluster, with Prometheus and Grafana watchin
 
 ### Cluster layout
 
-- [ ] kind cluster with one control-plane node and three worker nodes
-- [ ] Label and taint one node as the stand-in GPU pool. Workers get a `nodeSelector` and a toleration; nothing else can land there. This rehearses real GPU scheduling before there is a GPU.
+- [x] kind cluster with one control-plane node and three worker nodes
+- [x] Label and taint one node as the stand-in GPU pool. Workers get a `nodeSelector` and a toleration; nothing else can land there. This rehearses real GPU scheduling before there is a GPU.
 - [ ] Postgres as a StatefulSet with a PersistentVolumeClaim
 - [ ] Scheduler as a Deployment with one replica. Running two replicas is also safe for the reaper, because reaping is a conditional `UPDATE` and doing it twice changes nothing.
 - [ ] Workers as a Deployment of long-running pullers. One Kubernetes Job per build is a different design; Phase 6 compares the two.
