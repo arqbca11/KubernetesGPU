@@ -1,0 +1,185 @@
+== Go tests against a throwaway Postgres
+date:      2026-10-08 03:11:46 PDT
+commit:    8df964b 
+go:        go1.27.1
+postgres:  postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2) (image postgres:17, container kgpu-test-pg-24289, port 39979)
+go:        go test -p 1 -count=1 -v -run Kind -timeout 40m ./scheduler/crosscheck/
+python:    skipped
+
+Lines starting with 'store_test.go:N:' are the test narrating what it did.
+Lines tagged [db] are the build row as Postgres had it at that moment.
+
+== go test
+=== RUN   TestKind
+    kind_test.go:34: [setup] namespace kgpu snapshot (read only): 10 objects
+[cleanup] kubectl delete namespace kgpu-xcheck --wait
+[cleanup] err=<nil>     kind_test.go:45: [kubectl] apply:
+        namespace/kgpu-xcheck created
+        configmap/scheduler created
+        secret/postgres created
+        service/postgres created
+        service/scheduler created
+        deployment.apps/scheduler created
+        statefulset.apps/postgres created
+    kind_test.go:46: [k8s] 1 pod(s) app=postgres ready after 4.3s: [postgres-0(uid=a2905b69 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.41)]
+    kind_test.go:47: [k8s] 2 pod(s) app=scheduler ready after 5.5s: [scheduler-dbc976bcf-jrchp(uid=59a8b765 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.39) scheduler-dbc976bcf-wcj6g(uid=cb0f59f7 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.28)]
+    kind_test.go:48: [setup] stack ready in kgpu-xcheck after 9.9s
+=== RUN   TestKind/GPUNodeShape
+    kind_test.go:143: [node] kgpu-control-plane control-plane=true kgpu.io/gpu="" taints=[node-role.kubernetes.io/control-plane=:NoSchedule] allocatable gpu=""
+    kind_test.go:143: [node] kgpu-worker control-plane=false kgpu.io/gpu="" taints=[] allocatable gpu=""
+    kind_test.go:143: [node] kgpu-worker2 control-plane=false kgpu.io/gpu="" taints=[] allocatable gpu=""
+    kind_test.go:143: [node] kgpu-worker3 control-plane=false kgpu.io/gpu="true" taints=[kgpu.io/gpu=true:NoSchedule] allocatable gpu=""
+=== RUN   TestKind/GPUScheduling
+    kind_test.go:217: [kubectl] apply:
+        pod/plain-0 created
+        pod/plain-1 created
+        pod/plain-2 created
+        pod/plain-3 created
+        pod/plain-4 created
+        pod/plain-5 created
+        pod/plain-6 created
+        pod/plain-7 created
+        pod/worker-shaped created
+        pod/selector-only created
+        pod/toleration-only-0 created
+        pod/toleration-only-1 created
+        pod/toleration-only-2 created
+        pod/toleration-only-3 created
+        pod/toleration-only-4 created
+        pod/toleration-only-5 created
+    kind_test.go:220: [k8s] 8 pod(s) shape=plain ready after 1.1s: [plain-0(uid=8333160c node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.29) plain-1(uid=48f30b26 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.42) plain-2(uid=e1de1bb2 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.30) plain-3(uid=0eab6f18 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.43) plain-4(uid=4b9d9087 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.31) plain-5(uid=97e0215a node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.44) plain-6(uid=6be47346 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.32) plain-7(uid=0e8f6b1c node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.45)]
+    kind_test.go:228: [check] 8 plain pods spread map[kgpu-worker:4 kgpu-worker2:4]; none on kgpu-worker3
+    kind_test.go:236: [check] app=postgres pod postgres-0 on kgpu-worker (not the GPU node)
+    kind_test.go:236: [check] app=scheduler pod scheduler-dbc976bcf-jrchp on kgpu-worker (not the GPU node)
+    kind_test.go:236: [check] app=scheduler pod scheduler-dbc976bcf-wcj6g on kgpu-worker2 (not the GPU node)
+    kind_test.go:240: [k8s] 1 pod(s) shape=worker ready after 0.0s: [worker-shaped(uid=471cd9c4 node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.17)]
+    kind_test.go:244: [check] worker-shaped pod (selector + toleration) landed on kgpu-worker3
+    kind_test.go:255: [check] selector-only after >10s: selector-only(uid=1b3a4b3c node= phase=Pending ready=false restarts=0 ip=); FailedScheduling: 0/4 nodes are available: 2 node(s) didn't match Pod's node affinity/selector, 2 node(s) had untolerated taint(s). preemption: 0/4 nodes are available: 4 Preemption is not helpful for scheduling.
+    kind_test.go:264: [k8s] 6 pod(s) shape=toleration ready after 0.0s: [toleration-only-0(uid=c7c852d6 node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.18) toleration-only-1(uid=773fbcb7 node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.20) toleration-only-2(uid=dc41f95e node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.22) toleration-only-3(uid=a8dbc96a node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.19) toleration-only-4(uid=57ab62a6 node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.21) toleration-only-5(uid=a3a803c9 node=kgpu-worker3 phase=Running ready=true restarts=0 ip=10.244.2.23)]
+    kind_test.go:269: [observe] 6 toleration-only pods (no nodeSelector) spread map[kgpu-worker3:6]; 6 on the GPU node. The taint keeps out pods without the toleration; only the worker's own nodeSelector keeps it in. Any pod that copies the toleration can land on kgpu-worker3.
+=== RUN   TestKind/GPUResourceRequestPending
+    kind_test.go:281: [node] kgpu-worker3 allocatable: map[cpu:10 ephemeral-storage:977843695616 hugepages-1Gi:0 hugepages-2Mi:0 hugepages-32Mi:0 hugepages-64Ki:0 memory:8124516Ki pods:110]
+    kind_test.go:290: [kubectl] apply:
+        pod/worker-gpu-request created
+    kind_test.go:299: [check] worker shape + nvidia.com/gpu: 1 after >10s: worker-gpu-request(uid=a88f3f21 node= phase=Pending ready=false restarts=0 ip=); FailedScheduling: 0/4 nodes are available: 1 Insufficient nvidia.com/gpu, 1 node(s) had untolerated taint(s), 2 node(s) didn't match Pod's node affinity/selector. preemption: 0/4 nodes are available: 4 Preemption is not helpful for scheduling.
+    kind_test.go:306: [note] Phase 5 difference: on a real GPU pool the device plugin advertises nvidia.com/gpu and this exact pod schedules; on kind it cannot
+=== RUN   TestKind/TwoReplicasMigrateAndServe
+    kind_test.go:363: [log scheduler-dbc976bcf-jrchp] migration lines: []
+    kind_test.go:363: [log scheduler-dbc976bcf-wcj6g] migration lines: []
+    kind_test.go:369: [db] after the startup race: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:11:56.176422+00 0002_rounds_n_shards.sql|2026-10-08 10:11:56.180599+00 0003_query_stream.sql|2026-10-08 10:11:56.181337+00 0004_shard_fks.sql|2026-10-08 10:11:56.182559+00]
+    kind_test.go:369: [db] after the startup race: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:377: [race 1] schema emptied; scaling scheduler 0 -> 2
+    kind_test.go:379: [k8s] 2 pod(s) app=scheduler ready after 2.2s: [scheduler-dbc976bcf-8cww9(uid=ebdbcf06 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.46) scheduler-dbc976bcf-qgxgz(uid=8efdad47 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.33)]
+    kind_test.go:386: [race 1 log scheduler-dbc976bcf-8cww9] []
+    kind_test.go:386: [race 1 log scheduler-dbc976bcf-qgxgz] []
+    kind_test.go:391: [db] race 1: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:12:22.092291+00 0002_rounds_n_shards.sql|2026-10-08 10:12:22.096285+00 0003_query_stream.sql|2026-10-08 10:12:22.097011+00 0004_shard_fks.sql|2026-10-08 10:12:22.097867+00]
+    kind_test.go:391: [db] race 1: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:377: [race 2] schema emptied; scaling scheduler 0 -> 2
+    kind_test.go:379: [k8s] 2 pod(s) app=scheduler ready after 2.2s: [scheduler-dbc976bcf-7hv9c(uid=3b17ba9d node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.47) scheduler-dbc976bcf-txxxm(uid=f95f920d node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.34)]
+    kind_test.go:386: [race 2 log scheduler-dbc976bcf-7hv9c] []
+    kind_test.go:386: [race 2 log scheduler-dbc976bcf-txxxm] []
+    kind_test.go:391: [db] race 2: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:12:27.923108+00 0002_rounds_n_shards.sql|2026-10-08 10:12:27.927116+00 0003_query_stream.sql|2026-10-08 10:12:27.928259+00 0004_shard_fks.sql|2026-10-08 10:12:27.92925+00]
+    kind_test.go:391: [db] race 2: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:377: [race 3] schema emptied; scaling scheduler 0 -> 2
+    kind_test.go:379: [k8s] 2 pod(s) app=scheduler ready after 1.1s: [scheduler-dbc976bcf-5nztz(uid=1abfa846 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.35) scheduler-dbc976bcf-xlcdr(uid=daa5b540 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.48)]
+    kind_test.go:386: [race 3 log scheduler-dbc976bcf-5nztz] []
+    kind_test.go:386: [race 3 log scheduler-dbc976bcf-xlcdr] []
+    kind_test.go:391: [db] race 3: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:12:32.64714+00 0002_rounds_n_shards.sql|2026-10-08 10:12:32.653112+00 0003_query_stream.sql|2026-10-08 10:12:32.654055+00 0004_shard_fks.sql|2026-10-08 10:12:32.654931+00]
+    kind_test.go:391: [db] race 3: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:415: [lock] psql holds pg_advisory_lock(1262964821 = 0x4B475055) for 25s; scaling scheduler 0 -> 2
+    kind_test.go:424: [lock t=1.4s] 2 sessions waiting on the advisory lock; public tables: 0
+    kind_test.go:446: [lock] psql session ended after 25.1s: "  t "
+    kind_test.go:447: [k8s] 2 pod(s) app=scheduler ready after 1.2s: [scheduler-dbc976bcf-crjdg(uid=45bb096c node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.36) scheduler-dbc976bcf-nb65m(uid=89b9a4e6 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.49)]
+    kind_test.go:454: [db] after the held-lock race: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:13:01.973363+00 0002_rounds_n_shards.sql|2026-10-08 10:13:01.982381+00 0003_query_stream.sql|2026-10-08 10:13:01.983994+00 0004_shard_fks.sql|2026-10-08 10:13:01.987377+00]
+    kind_test.go:454: [db] after the held-lock race: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:457: [port-forward] pod/scheduler-dbc976bcf-crjdg on 127.0.0.1:28090
+    kind_test.go:458: [port-forward] pod/scheduler-dbc976bcf-nb65m on 127.0.0.1:28091
+    kind_test.go:462: [api :28090] GET /healthz -> 200 "{\"status\":\"ok\"}" err=<nil>
+    kind_test.go:462: [api :28090] GET /livez -> 200 "{\"status\":\"alive\"}" err=<nil>
+    kind_test.go:462: [api :28091] GET /healthz -> 200 "{\"status\":\"ok\"}" err=<nil>
+    kind_test.go:462: [api :28091] GET /livez -> 200 "{\"status\":\"alive\"}" err=<nil>
+    kind_test.go:468: [api :28090] POST /rounds {scenario:xcheck-two-a seed:11 n_shards:1} -> 201 round_id=1
+    kind_test.go:469: [api :28091] GET /rounds/1 -> 200 (scenario xcheck-two-a present)
+    kind_test.go:470: [api :28091] POST /rounds {scenario:xcheck-two-b seed:12 n_shards:1} -> 201 round_id=2
+    kind_test.go:471: [api :28090] GET /rounds/2 -> 200 (scenario xcheck-two-b present)
+    kind_test.go:476: [k8s] 1 pod(s) app=scheduler ready after 1.1s: [scheduler-dbc976bcf-nb65m(uid=89b9a4e6 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.49)]
+=== RUN   TestKind/DNSAndServices
+    kind_test.go:489: [k8s] postgres pod IP 10.244.1.41, postgres svc clusterIP "None", scheduler svc 10.96.104.28 (kgpu-xcheck) / 10.96.101.157 (kgpu)
+    kind_test.go:523: [kubectl] apply:
+        pod/dnsprobe created
+    kind_test.go:530: [dnsprobe]
+        DNS postgres => 10.244.1.41 
+        DNS postgres-0.postgres => 10.244.1.41 
+        DNS scheduler => 10.96.104.28 
+        DNS scheduler.kgpu-xcheck.svc => 10.96.104.28 
+        DNS scheduler.kgpu-xcheck.svc.cluster.local => 10.96.104.28 
+        DNS scheduler.kgpu.svc => 10.96.101.157 
+        postgres:5432 - accepting connections
+        PGREADY
+        HTTP /healthz => HTTP/1.0 200 OK
+        HTTP /livez => HTTP/1.0 200 OK
+=== RUN   TestKind/ProcessKillAndPodReplace
+    kind_test.go:578: [k8s] 1 pod(s) app=scheduler ready after 0.0s: [scheduler-dbc976bcf-nb65m(uid=89b9a4e6 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.49)]
+    kind_test.go:579: [port-forward] pod/scheduler-dbc976bcf-nb65m on 127.0.0.1:28090
+    kind_test.go:580: [api :28090] POST /rounds {scenario:xcheck-kill seed:21 n_shards:1} -> 201 round_id=3
+    kind_test.go:585: [observe] kubectl exec /bin/sh in scheduler-dbc976bcf-nb65m: err=exit status 1 error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "7157605304455b9e40c41a2de839ad34228390e5629ab9280b9c2aa17a05fd2d": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+    kind_test.go:604: [kill] SIGKILL host pid 16304 (scheduler) on node kgpu-worker, container 3a50bca8
+    kind_test.go:615: [check] after SIGKILL: scheduler-dbc976bcf-nb65m(uid=89b9a4e6 node=kgpu-worker phase=Running ready=true restarts=1 ip=10.244.1.49) (2.3s)
+    kind_test.go:622: [check] lastState.terminated exitCode=137 reason=Error
+    kind_test.go:624: [port-forward] pod/scheduler-dbc976bcf-nb65m on 127.0.0.1:28090
+    kind_test.go:625: [api :28090] GET /rounds/3 -> 200 (scenario xcheck-kill present)
+    kind_test.go:640: [check] after force delete: replacement scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.37) (1.7s)
+    kind_test.go:644: [port-forward] pod/scheduler-dbc976bcf-cnzns on 127.0.0.1:28090
+    kind_test.go:645: [api :28090] GET /rounds/3 -> 200 (scenario xcheck-kill present)
+=== RUN   TestKind/PostgresOutageReadinessNotLiveness
+    kind_test.go:697: [k8s] 1 pod(s) app=scheduler ready after 0.0s: [scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.37)]
+    kind_test.go:699: [port-forward] pod/scheduler-dbc976bcf-cnzns on 127.0.0.1:28090
+    kind_test.go:709: [outage] statefulset/postgres scaled to 0 at t=0
+    kind_test.go:732: [outage t=0.1s] GET /healthz -> 503 "{\"error\":\"postgres: FATAL: terminating connection due to administrator command (SQLSTATE 57P01)\"}"
+    kind_test.go:723: [outage t=8.0s] endpoints ready=[] notReady=[scheduler-dbc976bcf-cnzns]
+    kind_test.go:741: [outage] after 45s: scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=false restarts=0 ip=10.244.3.37); /healthz codes map[503:41]; Ready=false first seen at 7.9s; endpoint dropped at 8.0s
+    kind_test.go:759: [log] 46 ERROR lines during the outage, last few: [{"time":"2026-10-08T10:13:57.367788174Z","level":"ERROR","msg":"finish rounds failed","err":"failed to connect to `user=postgres database=kgpu`: hostname resolving error: lookup postgres on 10.96.0.10:53: no such host"} {"time":"2026-10-08T10:13:59.364396841Z","level":"ERROR","msg":"reap failed","err":"failed to connect to `user=postgres database=kgpu`: hostname resolving error: lookup postgres on 10.96.0.10:53: no such host"} {"time":"2026-10-08T10:13:59.369162091Z","level":"ERROR","msg":"finish rounds failed","err":"failed to connect to `user=postgres database=kgpu`: hostname resolving error: lookup postgres on 10.96.0.10:53: no such host"}]
+    kind_test.go:763: [k8s] 1 pod(s) app=postgres ready after 2.2s: [postgres-0(uid=0861018b node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.51)]
+    kind_test.go:768: [recover] scheduler Ready and back in endpoints 1.8s after Postgres was scaled up: scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.37)
+    kind_test.go:777: [api :28090] POST /rounds {scenario:xcheck-after-outage seed:31 n_shards:1} -> 201 round_id=4
+=== RUN   TestKind/StatefulSetDeletedClaimSurvives
+    kind_test.go:811: [k8s] 1 pod(s) app=scheduler ready after 0.0s: [scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.37)]
+    kind_test.go:812: [port-forward] pod/scheduler-dbc976bcf-cnzns on 127.0.0.1:28090
+    kind_test.go:813: [api :28090] POST /rounds {scenario:xcheck-sts-survive seed:41 n_shards:1} -> 201 round_id=5
+    kind_test.go:821: [before] 5 rounds; postgres-0 postgres-0(uid=0861018b node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.51); pvc uid=c7bae151 volume=pvc-c7bae151-9bfc-4cd7-8af6-7f5f60df8982 Bound
+    kind_test.go:826: [deleted] statefulset and pod gone; pvc present=true uid=c7bae151 phase=Bound
+    kind_test.go:831: [kubectl] apply:
+        statefulset.apps/postgres created
+    kind_test.go:832: [k8s] 1 pod(s) app=postgres ready after 1.1s: [postgres-0(uid=290b5dc7 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.52)]
+    kind_test.go:840: [recreated] postgres-0(uid=290b5dc7 node=kgpu-worker phase=Running ready=true restarts=0 ip=10.244.1.52) mounts claim data-postgres-0; pvc uid=c7bae151 volume=pvc-c7bae151-9bfc-4cd7-8af6-7f5f60df8982
+    kind_test.go:850: [db] rounds 5 -> 5; round 5 scenario "xcheck-sts-survive"
+    kind_test.go:854: [db] after StatefulSet recreate: schema_migrations has 4 rows (want 4): [0001_init.sql|2026-10-08 10:13:01.973363+00 0002_rounds_n_shards.sql|2026-10-08 10:13:01.982381+00 0003_query_stream.sql|2026-10-08 10:13:01.983994+00 0004_shard_fks.sql|2026-10-08 10:13:01.987377+00]
+    kind_test.go:854: [db] after StatefulSet recreate: tables builds,rounds,schema_migrations,shard_jobs,shard_status,workers
+    kind_test.go:857: [k8s] 1 pod(s) app=scheduler ready after 0.0s: [scheduler-dbc976bcf-cnzns(uid=4615e6a6 node=kgpu-worker2 phase=Running ready=true restarts=0 ip=10.244.3.37)]
+    kind_test.go:861: [port-forward] pod/scheduler-dbc976bcf-cnzns on 127.0.0.1:28090
+    kind_test.go:862: [api :28090] GET /rounds/5 -> 200 (scenario xcheck-sts-survive present)
+=== RUN   TestKind/OriginalNamespaceUntouched
+    kind_test.go:75: [check] namespace kgpu: 10 objects, same UIDs, generations and restart counts as before the run
+[cleanup] kubectl delete namespace kgpu-xcheck --wait
+[cleanup] err=<nil> namespace "kgpu-xcheck" deleted
+--- PASS: TestKind (154.66s)
+    --- PASS: TestKind/GPUNodeShape (0.04s)
+    --- PASS: TestKind/GPUScheduling (11.91s)
+    --- PASS: TestKind/GPUResourceRequestPending (10.30s)
+    --- PASS: TestKind/TwoReplicasMigrateAndServe (44.89s)
+    --- PASS: TestKind/DNSAndServices (2.45s)
+    --- PASS: TestKind/ProcessKillAndPodReplace (5.51s)
+    --- PASS: TestKind/PostgresOutageReadinessNotLiveness (50.48s)
+    --- PASS: TestKind/StatefulSetDeletedClaimSurvives (3.47s)
+    --- PASS: TestKind/OriginalNamespaceUntouched (0.08s)
+PASS
+ok  	github.com/arqbca11/KubernetesGPU/scheduler/crosscheck	154.903s
+
+== Docker events for container kgpu-test-pg-24289
+  03:11:45  create
+  03:11:45  start
+  03:14:22  kill
+  03:14:22  die
+  03:14:22  destroy
+
+== Result: PASS

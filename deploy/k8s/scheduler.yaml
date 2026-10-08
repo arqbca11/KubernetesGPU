@@ -59,10 +59,13 @@ spec:
             - name: http
               containerPort: 8080
           # Readiness: can reach Postgres (decision 6). Liveness: the process answers.
+          # Leaves the Service's endpoints after failureThreshold x periodSeconds
+          # of a failing database, about 9 s; observed 8 s (cross-check).
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 3
             timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             httpGet: {path: /livez, port: http}
             initialDelaySeconds: 5

@@ -25,6 +25,7 @@ Each step has its own tests first, then any scripts, then the independent cross-
 - [Step 7, cross-check at 50 shards (Go, `scheduler/crosscheck`, `Load*` tests with `KGPU_XCHECK_SHARDS=50 KGPU_XCHECK_WORKERS=3`; need `KGPU_COMPOSE=1`). Log: `step7-crosscheck-load-50.log`](#step-7-cross-check-at-50-shards-go-schedulercrosscheck-load-tests-with-kgpuxcheckshards50-kgpuxcheckworkers3-need-kgpucompose1-log-step7-crosscheck-load-50log)
 - [Phase 2, step 1: the kind cluster (`scripts/kind-check-gpu-node.sh`). Log: `phase2/step1-kind-cluster.log`](#phase-2-step-1-the-kind-cluster-scriptskind-check-gpu-nodesh-log-phase2step1-kind-clusterlog)
 - [Phase 2, step 2: Postgres and the scheduler on kind (`scripts/k8s-check-step2.sh`). Log: `phase2/step2-postgres-scheduler.log`](#phase-2-step-2-postgres-and-the-scheduler-on-kind-scriptsk8s-check-step2sh-log-phase2step2-postgres-schedulerlog)
+- [Phase 2, steps 1 and 2, cross-check on kind (Go, `scheduler/crosscheck`, `TestKind` subtests; need `KGPU_KIND=1`). Log: `phase2/step12-crosscheck-kind.log`](#phase-2-steps-1-and-2-cross-check-on-kind-go-schedulercrosscheck-testkind-subtests-need-kgpukind1-log-phase2step12-crosscheck-kindlog)
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -268,3 +269,19 @@ The step 6 suite parametrised by shard and worker count, plus three scale tests 
 | 2 | A round and a build through the Service, via port-forward. | The API works inside the cluster; readiness and liveness answer. |
 | 3 | Delete the scheduler pod. | The Deployment replaces it under a new name; the round is still there (state lives in Postgres, decision 3). |
 | 4 | Delete `postgres-0`. | The StatefulSet recreates it on the same claim with the data intact; the scheduler logs errors during the outage, keeps restart count 0, becomes ready again and serves a new round (decisions 11, 13, 14). |
+
+## Phase 2, steps 1 and 2, cross-check on kind (Go, `scheduler/crosscheck`, `TestKind` subtests; need `KGPU_KIND=1`). Log: `phase2/step12-crosscheck-kind.log`
+
+The agent deploys its own copy of the stack into a `kgpu-xcheck` namespace with two scheduler replicas, and deletes the namespace afterwards.
+
+| Test | Scenario | Proves |
+| --- | --- | --- |
+| Kind/GPUNodeShape | Read every node's labels, taints and allocatable resources. | Exactly one node carries the GPU label and the NoSchedule taint; the general nodes are untainted (decision 9). |
+| Kind/GPUScheduling | Eight plain pods, a worker-shaped pod, a selector-only pod and six toleration-only pods. | Plain pods never land on the GPU node; the worker shape does; selector-only stays Pending citing the taint; a toleration alone is enough to land there (decisions 5, 10). |
+| Kind/GPUResourceRequestPending | A worker-shaped pod that also requests `nvidia.com/gpu: 1`. | On kind it stays Pending with "Insufficient nvidia.com/gpu": the one change Phase 5 makes. |
+| Kind/TwoReplicasMigrateAndServe | Two scheduler replicas start together on an empty database, four times; once more while the test holds the migration's advisory lock. | Migrations are applied once, never duplicated, never crash a replica; both wait on the lock and neither becomes ready without a schema; both serve the API and see each other's writes (Phase 1 decision 11, Phase 2 decision 2). |
+| Kind/DNSAndServices | A throwaway pod resolves names and calls the Services. | `postgres` is headless and resolves to the pod; the scheduler Service resolves by short name and FQDN and answers `/healthz` and `/livez` in-cluster (decision 13). |
+| Kind/ProcessKillAndPodReplace | SIGKILL the scheduler process from the node, then force-delete the pod. | The kubelet restarts the container in place (exit 137, restart count 1); the controller replaces a deleted pod under a new name; no data is lost either way. |
+| Kind/PostgresOutageReadinessNotLiveness | Postgres scaled to zero for 45 s, then back. | `/healthz` returns 503 and the pod leaves the ready endpoints while `/livez` stays 200 and the restart count stays 0; recovery is automatic (decisions 6, 11, 14). |
+| Kind/StatefulSetDeletedClaimSurvives | Delete the Postgres StatefulSet, keep the claim, re-apply. | A new pod reattaches the same claim and volume; rounds and migrations survive; the scheduler recovers without a restart (decisions 3, 13). |
+| Kind/OriginalNamespaceUntouched | Snapshot the `kgpu` namespace before and after the run. | The cross-check never touched the implementer's namespace. |

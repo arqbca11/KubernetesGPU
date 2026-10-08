@@ -67,10 +67,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
+	rep, err := db.MigrateReport(ctx, pool)
+	if err != nil {
 		log.Error("migrate failed", "err", err)
 		os.Exit(1)
 	}
+	log.Info("migrations checked", "applied_now", rep.Applied, "already_applied", rep.AlreadyThere,
+		"waited_for_lock", rep.WaitedForLock.Round(time.Millisecond))
 	st := store.New(pool)
 
 	go reaper.Run(ctx, st, reaper.Config{Interval: reapInterval, MaxAttempts: int32(maxAttempts)}, log)
