@@ -13,6 +13,7 @@
                               (scaled) time is under this, else release it; default 5
     FAKE_FAIL_BUILD_IDS       comma-separated build ids the fake builder fails at 50%
                               (test and demo knob for the fail path); default none
+    HEALTH_ADDR               where the probe server listens; default :8081; empty disables
     LOG_FORMAT                json (default) or text
     COST_*                    cost model overrides, same names as the scheduler
 
@@ -47,6 +48,7 @@ class Config:
     fake_time_scale: float
     shutdown_finish_budget_s: float
     fake_fail_build_ids: frozenset[str]
+    health_addr: str
     log_format: str
     model: Model
 
@@ -105,6 +107,7 @@ class Config:
             fake_time_scale=f("FAKE_TIME_SCALE", 1.0),
             shutdown_finish_budget_s=f("SHUTDOWN_FINISH_BUDGET_SECONDS", 5),
             fake_fail_build_ids=frozenset(x.strip() for x in (env.get("FAKE_FAIL_BUILD_IDS") or "").split(",") if x.strip()),
+            health_addr=env.get("HEALTH_ADDR", ":8081"),
             log_format=env.get("LOG_FORMAT") or "json",
             model=model,
         )

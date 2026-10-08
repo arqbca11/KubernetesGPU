@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-**In progress.** Started 2026-10-08. Steps 1 (the cluster) and 2 (Postgres and the scheduler) done; steps 3 to 6 (workers, shards, metrics, failure injection) to come.
+**In progress.** Started 2026-10-08. Steps 1 (the cluster), 2 (Postgres and the scheduler) and 3 (workers) done; steps 4 to 6 (shards, metrics, failure injection) to come.
 
 Run the Phase 1 system unchanged on a local kind cluster, with Prometheus and Grafana watching it. The scheduler code and the schema do not change. What changes is who keeps processes alive and where they run.
 
@@ -99,6 +99,10 @@ sequenceDiagram
 | 13 | **Postgres is a one-replica StatefulSet behind a headless Service, with `PGDATA` in a subdirectory of the claimed volume** | A Deployment with a PVC; a managed database | A StatefulSet gives the pod a stable name and a claim that outlives it (the step 2 check deletes the pod and finds the rounds still there). The headless Service makes `postgres` resolve to the pod itself. `PGDATA` must be a subdirectory because the mount point is not empty. |
 | 14 | **The scheduler needs no retry wrapper around its Postgres calls beyond reconnecting.** Shards retry their calls (decision 61 in Phase 1), the reaper runs every tick, and pgx's pool re-establishes broken connections | Retry with backoff inside every store call (the roadmap's wording) | During the Postgres outage every scheduler call failed for a few seconds, clients retried, the reaper's next tick succeeded, and nothing was lost; a per-call retry would only have hidden the outage from the logs. The roadmap item is satisfied by the pieces that already exist. |
 | 15 | **Migrations report what they did:** the scheduler logs `migrations checked` with the files applied by this process, how many were already there, and how long the advisory lock took | Silent migrations | With two replicas starting together the logs could not show which one applied the schema or that the other waited on the lock; the cross-check had to read `pg_locks` to see it. (Cross-check gap.) |
+| 16 | **The worker serves its probes from a thread of its own:** `/livez` always 200, `/healthz` 200 only if a heartbeat to Postgres succeeded within three heartbeat intervals | Reuse the main loop; probe via `exec` | A worker thirty minutes into a build must still answer liveness, and readiness must track Postgres, not the build. Verified mid-build in the step 3 check. |
+| 17 | **`WORKER_ID` is the pod name, from the downward API** | The hostname (what Compose used) | On Kubernetes the hostname is the pod name anyway, but saying so explicitly gives a readable, unique id per replica, and a replaced pod gets a new one. |
+| 18 | **The worker image carries its own init (tini at PID 1)** | Rely on the platform's init flag | Compose had `init: true`; Kubernetes has no such flag. Without an init, python is PID 1 and an in-container SIGKILL is dropped by the kernel: the first version of the step 3 crash test killed nothing. tini also forwards SIGTERM and reaps zombies. |
+| 19 | **The crash test on Kubernetes is an in-container kill of the worker process, not a forced pod deletion.** `kubectl delete pod --grace-period=0 --force` still delivers SIGTERM before the kill, so the worker's release path runs and no lease expires; it is a graceful stop in disguise. The in-container kill exits the container with 137, the lease expires, the reaper requeues, and the kubelet restarts the container in place | Treat forced deletion as the crash | Measured: forced deletion gave attempt 2 in 8 s with zero lease expiries; the in-container kill gave attempt 2 in 17 s (10 s lease plus the 6.5 s build) with one expiry and restart count 1. The script keeps the forced deletion as a documented observation. |
 
 ## Implementation notes
 
@@ -146,6 +150,17 @@ Real builds are minutes on a GPU and hours on a CPU (see the Phase 1 doc, "Cost 
 - **Probes must not depend on the build thread.** A worker in a 30-minute GPU build must still answer its liveness and readiness probes; the probe endpoint runs on its own thread, like the heartbeat does today, and a probe failure must mean the process is stuck, not that it is busy.
 - **`terminationGracePeriodSeconds` stays short and release is the norm.** A build that takes minutes cannot finish inside any sane grace period, so on SIGTERM the worker releases (decision 37's budget stays a few seconds); the grace period only needs to cover the release write. Draining a GPU node therefore costs the in-flight builds' progress, which is the number Phase 5 measures under spot preemption.
 - **Shard CPU limits must leave room for a local build's threads.** Hours-long local builds at 2 threads are the modeled case; a limit below that silently changes the cost model. Set requests and limits so the local build gets its modeled threads.
+
+### Step 3: the workers (done 2026-10-08)
+
+| Path | What |
+| --- | --- |
+| `worker/kgpu_worker/health.py` | The probe server thread (decision 16); `HEALTH_ADDR`, default `:8081`. |
+| `worker/Dockerfile` | tini as PID 1 (decision 18). |
+| `deploy/k8s/worker.yaml` | ConfigMap with test-friendly values (10 s lease, 10x fake builds), a Deployment of two replicas with the GPU node selector and toleration, `WORKER_ID` from the pod name, probes on 8081, a 30 s termination grace period. |
+| `scripts/k8s-check-step3.sh` | The step's check; saves `test-logs/phase2/step3-workers.log`. |
+
+Observed: both workers on `kgpu-worker3`, registered under their pod names; a 2M-vector build done at attempt 1 with both probes answering 200 mid-build; a graceful deletion mid-build released the build within a second and the replacement landed on the GPU node, the build finishing at attempt 2 once; an in-container kill expired the lease and the build finished at attempt 2 once, 17 s later, with the container restarted in place; a forced deletion ran the release path (decision 19).
 
 ## Open questions
 

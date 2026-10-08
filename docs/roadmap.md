@@ -208,14 +208,14 @@ Run the same system on a local kind cluster, with Prometheus and Grafana watchin
 - [x] Label and taint one node as the stand-in GPU pool. Workers get a `nodeSelector` and a toleration; nothing else can land there. This rehearses real GPU scheduling before there is a GPU.
 - [x] Postgres as a StatefulSet with a PersistentVolumeClaim
 - [x] Scheduler as a Deployment with one replica. Running two replicas is also safe for the reaper, because reaping is a conditional `UPDATE` and doing it twice changes nothing.
-- [ ] Workers as a Deployment of long-running pullers. One Kubernetes Job per build is a different design; Phase 6 compares the two.
+- [x] Workers as a Deployment of long-running pullers. One Kubernetes Job per build is a different design; Phase 6 compares the two.
 - [ ] Shards as a StatefulSet, e.g. 5 pods running 10 simulated shards each. Set CPU requests and limits now, so local builds compete for real CPU in Phase 4.
 
 ### Lifecycle
 
-- [ ] Readiness probe: a worker is ready only once it can reach Postgres
-- [ ] Liveness probe on every service
-- [ ] Graceful shutdown: on SIGTERM a worker stops claiming, then either finishes its job within `terminationGracePeriodSeconds` or releases it with a guarded `UPDATE` back to `queued`. Releasing explicitly is faster than waiting for the lease to expire.
+- [x] Readiness probe: a worker is ready only once it can reach Postgres
+- [x] Liveness probe on every service *(scheduler and worker; shards in step 4)*
+- [x] Graceful shutdown: on SIGTERM a worker stops claiming, then either finishes its job within `terminationGracePeriodSeconds` or releases it with a guarded `UPDATE` back to `queued`. Releasing explicitly is faster than waiting for the lease to expire.
 - [x] Retries with backoff on every Postgres call, so a database restart doesn't crash anything *(shards retry their calls, the worker reconnects and retries until the lease deadline, the scheduler reconnects through its pool and the reaper retries by ticking; the Postgres-pod deletion in step 2 crashed nothing)*
 
 ### Metrics

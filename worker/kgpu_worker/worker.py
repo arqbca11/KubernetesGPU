@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from .builder import Artifact, Builder, Cancelled, Job
 from .config import Config
+from .health import Health
 from .store import Claimed, Store, is_connection_error
 
 log = logging.getLogger("kgpu.worker")
@@ -52,6 +53,9 @@ class Worker:
         self.stopping = threading.Event()   # SIGTERM received: no more claims
         self.current: Current | None = None
         self._lock = threading.Lock()
+        # Readiness = a heartbeat succeeded within 3 intervals (the scheduler's
+        # own staleness rule is WORKER_STALE_AFTER; this is the worker's view).
+        self.health = Health(stale_after_s=3 * cfg.heartbeat_interval_s)
         self.builds_done = 0                 # for tests and logs
         self.builds_lost = 0                 # ownership lost (fencing); never counts a clean release
         self.builds_released = 0             # handed back on shutdown
@@ -86,6 +90,8 @@ class Worker:
             cur.cancel.set()
 
     def run(self) -> None:
+        if self.cfg.health_addr:
+            self.health.serve(self.cfg.health_addr)   # before connecting: liveness answers from the start
         self.store.connect()
         log.info("worker starting", extra={"worker_id": self.cfg.worker_id, "mem_bytes": self.cfg.mem_bytes,
                                           "builder": self.builder.name, "lease_s": self.cfg.lease_s,
@@ -93,6 +99,7 @@ class Worker:
         # The first heartbeat is synchronous: a worker must be in `workers`
         # before it can hold a lease, so pool state never misses a busy worker.
         self.store.heartbeat(self.cfg.worker_id, self.cfg.mem_bytes)
+        self.health.heartbeat_ok()
         log.info("registered", extra={"worker_id": self.cfg.worker_id})
         hb = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
         hb.start()
@@ -274,6 +281,7 @@ class Worker:
             while True:
                 try:
                     store.heartbeat(self.cfg.worker_id, self.cfg.mem_bytes)
+                    self.health.heartbeat_ok()
                 except Exception as e:  # noqa: BLE001
                     if is_connection_error(e):
                         log.warning("postgres unavailable during heartbeat, reconnecting", extra={"err": str(e).strip()[:200]})

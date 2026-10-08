@@ -1,0 +1,80 @@
+# GPU workers: a Deployment of long-running pullers pinned to the GPU node by
+# a node selector and a toleration (Phase 2 decisions 1, 5). WORKER_ID is the
+# pod name. The probe server runs on its own thread (port 8081): /livez is
+# liveness, /healthz (a recent heartbeat) is readiness. SIGTERM gives the
+# worker terminationGracePeriodSeconds to finish or release its build.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker
+  namespace: kgpu
+data:
+  # Phase 2 still runs fake builds; these are test-friendly values (short leases,
+  # 10x time scale) so failure injection fits in seconds. Phase 4 changes them.
+  WORKER_MEM_BYTES: "8589934592"
+  LEASE_SECONDS: "10"
+  RENEW_INTERVAL_SECONDS: "3"
+  HEARTBEAT_INTERVAL_SECONDS: "3"
+  POLL_INTERVAL_SECONDS: "0.5"
+  FAKE_TIME_SCALE: "10"
+  SHUTDOWN_FINISH_BUDGET_SECONDS: "5"
+  HEALTH_ADDR: ":8081"
+  LOG_FORMAT: json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: kgpu
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      nodeSelector:
+        kgpu.io/gpu: "true"
+      tolerations:
+        - key: kgpu.io/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # SIGTERM, then this long, then SIGKILL. The worker releases a long build
+      # within a second and finishes a short one inside the budget above.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: kgpu-worker:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: worker
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: DATABASE_URL
+            - name: WORKER_ID          # the pod name, from the downward API
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "100m", memory: "128Mi"}
+            limits: {memory: "512Mi"}

@@ -13,7 +13,12 @@ COPY kgpu_worker ./kgpu_worker
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
+# tini as PID 1: forwards SIGTERM to python (so the release-on-shutdown path
+# runs) and reaps zombies. It also means python is NOT PID 1, so a SIGKILL
+# sent to it from inside the container is a real crash: the kernel ignores
+# SIGKILL aimed at a PID namespace's init from within. Compose had init: true
+# for this; Kubernetes has no such flag, so the image carries its own init.
+RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 RUN useradd --no-create-home --uid 10001 worker
 USER worker
-# SIGTERM goes to python directly (exec form, no shell), so the release-on-shutdown path runs.
-ENTRYPOINT ["python", "-m", "kgpu_worker"]
+ENTRYPOINT ["/usr/bin/tini", "--", "python", "-m", "kgpu_worker"]

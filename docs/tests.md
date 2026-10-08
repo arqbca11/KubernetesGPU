@@ -26,6 +26,7 @@ Each step has its own tests first, then any scripts, then the independent cross-
 - [Phase 2, step 1: the kind cluster (`scripts/kind-check-gpu-node.sh`). Log: `phase2/step1-kind-cluster.log`](#phase-2-step-1-the-kind-cluster-scriptskind-check-gpu-nodesh-log-phase2step1-kind-clusterlog)
 - [Phase 2, step 2: Postgres and the scheduler on kind (`scripts/k8s-check-step2.sh`). Log: `phase2/step2-postgres-scheduler.log`](#phase-2-step-2-postgres-and-the-scheduler-on-kind-scriptsk8s-check-step2sh-log-phase2step2-postgres-schedulerlog)
 - [Phase 2, steps 1 and 2, cross-check on kind (Go, `scheduler/crosscheck`, `TestKind` subtests; need `KGPU_KIND=1`). Log: `phase2/step12-crosscheck-kind.log`](#phase-2-steps-1-and-2-cross-check-on-kind-go-schedulercrosscheck-testkind-subtests-need-kgpukind1-log-phase2step12-crosscheck-kindlog)
+- [Phase 2, step 3: the workers on kind (`scripts/k8s-check-step3.sh`). Log: `phase2/step3-workers.log`](#phase-2-step-3-the-workers-on-kind-scriptsk8s-check-step3sh-log-phase2step3-workerslog)
 
 ## Step 1: the store (Go, `scheduler/store`). Log: `step1-store.log`
 
@@ -285,3 +286,13 @@ The agent deploys its own copy of the stack into a `kgpu-xcheck` namespace with 
 | Kind/PostgresOutageReadinessNotLiveness | Postgres scaled to zero for 45 s, then back. | `/healthz` returns 503 and the pod leaves the ready endpoints while `/livez` stays 200 and the restart count stays 0; recovery is automatic (decisions 6, 11, 14). |
 | Kind/StatefulSetDeletedClaimSurvives | Delete the Postgres StatefulSet, keep the claim, re-apply. | A new pod reattaches the same claim and volume; rounds and migrations survive; the scheduler recovers without a restart (decisions 3, 13). |
 | Kind/OriginalNamespaceUntouched | Snapshot the `kgpu` namespace before and after the run. | The cross-check never touched the implementer's namespace. |
+
+## Phase 2, step 3: the workers on kind (`scripts/k8s-check-step3.sh`). Log: `phase2/step3-workers.log`
+
+| Step | Scenario | Proves |
+| --- | --- | --- |
+| 1 | List the worker pods and the scheduler's pool. | Both run on the GPU node and are registered under their pod names (decisions 1, 5, 17). |
+| 2 | A 2M-vector build; probe the leaseholder mid-build from inside. | Done at attempt 1, completed once; `/livez` and `/healthz` answer 200 while the build runs (decision 16). |
+| 3 | `kubectl delete pod` the leaseholder mid-build. | SIGTERM: the build is released within a second, the Deployment's replacement lands on the GPU node, and the build finishes at attempt 2 exactly once (decision 37 of Phase 1). |
+| 4 | SIGKILL the worker's python process inside its container (tini is PID 1). | The lease expires, the reaper requeues, attempt 2 completes once, the container is restarted in place with restart count 1 (decisions 18, 19). |
+| 5 | `kubectl delete pod --grace-period=0 --force` the leaseholder (observation). | The release path still runs and no lease expires: a forced deletion is a graceful stop in disguise, not a crash (decision 19). |

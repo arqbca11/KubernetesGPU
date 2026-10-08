@@ -1,0 +1,42 @@
+
+== Phase 2 step 3: GPU workers on kind  (2026-10-08 03:22:52 PDT, commit 4eaeb01)
+
+== 1. Both workers run on the GPU node and are registered with the scheduler
+   worker-56d7fb6b8c-f55sn Completed restarts=0 node=kgpu-worker3
+   worker-77dfc6594c-6n55f Running restarts=0 node=kgpu-worker3
+   worker-77dfc6594c-sw7w9 Running restarts=0 node=kgpu-worker3
+   pool: 2 live: worker-77dfc6594c-6n55f, worker-77dfc6594c-sw7w9
+   worker ids are the pod names (downward API)
+
+== 2. A build completes at attempt 1; the probes answer while it builds
+   round 13, build 0:13 (2M vectors: 65 s modeled, 6.5 s at 10x)
+   leased to worker-77dfc6594c-6n55f
+   mid-build probes on worker-77dfc6594c-6n55f: /livez=200 /healthz=200
+   {'build_id': '0:13', 'state': 'done', 'attempt': 1, 'lease_owner': None}
+
+== 3. Graceful deletion (kubectl delete pod, SIGTERM) mid-build: the worker releases, the Deployment replaces it on the GPU node
+   leased to worker-77dfc6594c-6n55f; deleting the pod (grace 30 s, budget 5 s, ~5.5 s of build left -> release)
+   +1 s: {'build_id': '0:14', 'state': 'queued', 'attempt': 1, 'lease_owner': None}
+   {'build_id': '0:14', 'state': 'done', 'attempt': 2, 'lease_owner': None}
+   worker-77dfc6594c-fj5fj Running restarts=0 node=kgpu-worker3
+   worker-77dfc6594c-sw7w9 Running restarts=0 node=kgpu-worker3
+   the deleted worker's last lines:
+   (pod log already gone; it exited within the grace period)
+
+== 4. Crash the worker process inside its container (SIGKILL by pid; the python image has a shell): no shutdown path, the lease expires, the reaper recovers it, the kubelet restarts the container in place
+   leased to worker-77dfc6594c-sw7w9; killing its python process
+   +17 s: {'build_id': '0:15', 'state': 'done', 'attempt': 2, 'lease_owner': None}
+   scheduler 'lease expired' lines: 0 -> 1
+   kubelet restarted the container in place: restart count 0 -> 1 (same pod worker-77dfc6594c-sw7w9)
+   worker-77dfc6594c-fj5fj Running restarts=0 node=kgpu-worker3
+   worker-77dfc6594c-sw7w9 Running restarts=1 node=38s
+
+== 5. Observation: a forced deletion (--grace-period=0 --force) still lets the shutdown path run
+   leased to worker-77dfc6594c-fj5fj; force-deleting the pod
+   +8 s: {'build_id': '0:16', 'state': 'done', 'attempt': 2, 'lease_owner': None}; lease expiries 1 -> 1
+   no expiry: the kubelet delivered SIGTERM and the worker released before the kill. A forced delete is NOT a crash; use step 4's in-container kill for that.
+   worker-77dfc6594c-qkdmv Running restarts=0 node=kgpu-worker3
+   worker-77dfc6594c-sw7w9 Running restarts=1 node=48s
+
+== Result: PASS
+log: test-logs/phase2/step3-workers.log
